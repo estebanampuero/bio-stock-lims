@@ -3,7 +3,7 @@ import { Shield, LayoutDashboard, Trash2, Users, Activity, History, LogOut, User
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { parseGS1 } from "../utils/gs1Parser";
 
-const API_URL = `http://${window.location.hostname}:3000/api`;
+const API_URL = "/api";
 
 const formatExp = (exp: string) => {
   if (!exp || exp.length !== 6) return exp;

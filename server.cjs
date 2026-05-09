@@ -2,10 +2,19 @@
 const cors = require("cors");
 const sqlite3 = require("sqlite3").verbose();
 const { open } = require("sqlite");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ── Servir el frontend compilado (producción) ─────────────────────────────────
+// El build de React queda en ./dist después de ejecutar "npm run build"
+const distPath = path.join(__dirname, "dist");
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
 
 let db;
 
@@ -122,7 +131,7 @@ app.delete("/api/usuarios/:id", async (req, res) => {
   res.json({ success: true });
 });
 
-// Health check requerido por Docker y balanceadores de carga
+// Health check
 app.get("/health", async (req, res) => {
   try {
     await db.get("SELECT 1");
@@ -132,5 +141,16 @@ app.get("/health", async (req, res) => {
   }
 });
 
+// ── SPA fallback: cualquier ruta no reconocida devuelve index.html ─────────────
+// Debe ir DESPUÉS de todas las rutas /api para no interceptarlas
+if (fs.existsSync(distPath)) {
+  app.get("*", (_req, res) => {
+    res.sendFile(path.join(distPath, "index.html"));
+  });
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 BIO-STOCK API Online (puerto ${PORT})`));
+app.listen(PORT, "0.0.0.0", () => {
+  const url = `http://localhost:${PORT}`;
+  console.log(`\n🚀 BIO-STOCK LIMS corriendo en ${url}\n`);
+});
