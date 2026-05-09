@@ -1,0 +1,31 @@
+FROM node:22-alpine AS deps
+WORKDIR /app
+
+# Instalar dependencias del sistema para sqlite3 (requiere compilación nativa)
+RUN apk add --no-cache python3 make g++ wget
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:22-alpine AS runtime
+WORKDIR /app
+
+# Copiar binarios compilados desde la etapa anterior
+COPY --from=deps /app/node_modules ./node_modules
+COPY server.cjs ./
+
+# Crear directorios de datos y logs con permisos correctos
+RUN mkdir -p /app/data /app/backups /app/logs && \
+    addgroup -g 1001 biostock && \
+    adduser -u 1001 -G biostock -s /bin/sh -D biostock && \
+    chown -R biostock:biostock /app
+
+USER biostock
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+CMD ["node", "server.cjs"]

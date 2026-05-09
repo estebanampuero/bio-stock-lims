@@ -1,4 +1,14 @@
-﻿node_modules/
+node_modules/
 dist/
 .env
 .DS_Store
+
+# Datos y backups — nunca en git
+data/
+backups/
+logs/
+
+# SQLite — la DB vive en ./data/ en producción
+*.db
+*.db-wal
+*.db-shm

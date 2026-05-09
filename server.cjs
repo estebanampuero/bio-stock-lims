@@ -30,9 +30,19 @@ async function runMigrations(db) {
 }
 
 (async () => {
-  db = await open({ filename: "./inventario_biorad.db", driver: sqlite3.Database });
+  const dbPath = process.env.DB_PATH || "./inventario_biorad.db";
+  db = await open({ filename: dbPath, driver: sqlite3.Database });
+
+  // WAL mode: lecturas concurrentes ilimitadas, escrituras no bloquean lectores
+  // Crítico para múltiples usuarios en red local simultáneos
+  await db.exec("PRAGMA journal_mode = WAL");
+  await db.exec("PRAGMA synchronous = NORMAL");
+  await db.exec("PRAGMA cache_size = -64000");
+  await db.exec("PRAGMA temp_store = memory");
+  await db.exec("PRAGMA foreign_keys = ON");
+
   await runMigrations(db);
-  console.log("✅ Servidor con Láser Multicaja Online.");
+  console.log(`✅ BIO-STOCK API lista. DB: ${dbPath}`);
 })();
 
 async function registrarLog(usuario, accion, detalles) {
@@ -112,4 +122,15 @@ app.delete("/api/usuarios/:id", async (req, res) => {
   res.json({ success: true });
 });
 
-app.listen(3000, "0.0.0.0", () => console.log("🚀 Server API V9 Online"));
+// Health check requerido por Docker y balanceadores de carga
+app.get("/health", async (req, res) => {
+  try {
+    await db.get("SELECT 1");
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  } catch (e) {
+    res.status(503).json({ status: "error", message: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 BIO-STOCK API Online (puerto ${PORT})`));

@@ -1,0 +1,79 @@
+services:
+
+  # ─── Reverse Proxy + Servidor de archivos estáticos ──────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: biostock_nginx
+    ports:
+      - "${HOST_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - biostock_internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ─── Frontend Builder (multi-stage, corre una vez al iniciar) ─────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: biostock_frontend_build
+    volumes:
+      - frontend_dist:/app/dist
+    networks:
+      - biostock_internal
+
+  # ─── API Backend ──────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: biostock_api
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
+      DB_PATH: /app/data/inventario_biorad.db
+      BACKUP_PATH: /app/backups
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-*}
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - biostock_internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "10"
+
+volumes:
+  frontend_dist:
+
+networks:
+  biostock_internal:
+    driver: bridge
+    internal: false
