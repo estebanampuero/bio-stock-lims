@@ -1,8 +1,8 @@
 # CLAUDE.md — BIO-STOCK LIMS Pro
 ## Guía Arquitectónica, Estándares y Roadmap Técnico
 
-> **Versión del documento:** 2.0 — Actualizado: 2026-05-08  
-> **Estado del sistema:** v1.0 MVP funcional — pendiente hardening enterprise  
+> **Versión del documento:** 2.1 — Actualizado: 2026-05-09  
+> **Estado del sistema:** v1.1 MVP funcional con UI refactorizada — pendiente hardening enterprise  
 > **Modalidad de despliegue:** On-premise / Red interna corporativa (sin dependencia cloud)  
 > **Audiencia:** Desarrolladores, arquitectos, agentes de IA colaborando en este proyecto
 
@@ -47,37 +47,42 @@ Esta restricción determina **todas** las decisiones de arquitectura: base de da
 ```
 
 **Stack actual:**
-- Frontend: React 19 + TypeScript + Vite 7 + Recharts + Lucide
-- Backend: Express 5 + SQLite3 + node-sqlite (wrapper async)
-- DB: SQLite (archivo local único)
+- Frontend: React 19 + TypeScript + Vite 7 + Recharts + Lucide Icons
+- Backend: Express 5 + SQLite3 + node-sqlite (wrapper async) — `server.cjs`
+- DB: SQLite WAL mode (archivo local único `inventario_biorad.db`)
 - Desktop: Tauri 2.0 (configurado pero sin uso real — app corre como webapp)
-- Deploy: `.bat` que lanza `npm run dev` (modo desarrollo en producción)
+- Deploy: `Iniciar.bat` / `Iniciar.ps1` que compila con `npm run build` y lanza `node server.cjs` (modo producción)
+- Express sirve tanto la SPA React (`/dist`) como la API REST (`/api/*`) desde el puerto 3000
 
 ### 1.2 Módulos Existentes
 
 | Módulo | Archivo | Estado |
 |--------|---------|--------|
-| App principal (activo) | `src/components/InventoryApp.tsx` | Activo |
-| App legacy (abandonado) | `src/InventoryApp.tsx` | Duplicado — eliminar |
-| Input alternativo (abandonado) | `src/components/InventoryInput.tsx` | Duplicado — eliminar |
-| Parser GS1 | `src/utils/gs1Parser.ts` | Funcional, bien diseñado |
-| Servidor principal | `server.cjs` | Activo (CommonJS) |
-| Servidor legacy | `server.js` | Duplicado ES Modules — eliminar |
+| App principal | `src/components/InventoryApp.tsx` | ✅ Activo — refactorizado v1.1 |
+| Parser GS1 | `src/utils/gs1Parser.ts` | ✅ Funcional, bien diseñado |
+| Servidor principal | `server.cjs` | ✅ Activo (CommonJS, Express 5) |
+| App legacy | `src/InventoryApp.tsx` | 🗑️ Eliminado en v1.1 |
+| Input legacy | `src/components/InventoryInput.tsx` | 🗑️ Eliminado en v1.1 |
+| Servidor legacy | `server.js` | 🗑️ Pendiente eliminar (ES Modules redundante) |
 
-### 1.3 Flujo de Datos Actual
+### 1.3 Flujo de Datos Actual (v1.1)
 
 ```
 Escáner Láser (HID keyboard emulation)
     │
-    ▼
-KeyDown event listener (global window)
+    ├── [A] FUERA de cualquier input (modo normal)
+    │       KeyDown listener global acumula en barcodeBuffer.current
+    │       En Enter → procesarEscaneo(buffer)
     │
-    ├── Buffer acumula caracteres hasta Enter
-    │
-    ▼
-parseGS1(codigo) → { gtin, lot, expiration }
+    └── [B] DENTRO del modal "Clasificar Control"
+            Campo de escaneo dedicado (scanInputRef) con su propio onKeyDown
+            En Enter → parseGS1() y auto-rellena campos del formulario
+
+parseGS1(codigo) → { gtin, lot, expiration }  // src/utils/gs1Parser.ts
     │
     ├── GET /api/producto/:gtin
+    │       WHERE nombre IS NOT NULL (productos sin clasificar → null, abren modal)
+    │
     │       ├── Existe → POST /api/inventario (registro directo)
     │       └── No existe → Modal registro maestro → POST /api/producto + POST /api/inventario
     │
@@ -146,20 +151,22 @@ const id = Math.random().toString(36).substr(2,9); // Colisiones posibles, prede
 
 ### 3.1 Código
 
-| Problema | Severidad | Archivo(s) |
-|----------|-----------|-----------|
-| Contraseña hardcodeada en frontend | Crítica | `src/InventoryApp.tsx:166` |
-| `any[]` en todos los estados React | Alta | `components/InventoryApp.tsx` |
-| Inline styles en todo el componente | Alta | Todos los `.tsx` |
-| Fetch calls dentro de JSX inline | Alta | `components/InventoryApp.tsx:250,287` |
-| `alert()` y `confirm()` nativos del browser | Media | Todos los `.tsx` |
-| Polling cada 3s en vez de WebSocket | Media | `components/InventoryApp.tsx:59` |
-| Componente monolítico de 360 líneas | Media | `components/InventoryApp.tsx` |
-| Sin manejo de errores en fetch | Media | Todos los `.tsx` |
-| Sin loading states | Media | Todos los `.tsx` |
-| `Math.random()` para IDs | Media | `server.cjs:51`, `components/InventoryApp.tsx` |
-| Dos server files activos (`server.js` + `server.cjs`) | Media | Raíz |
-| Tres versiones del componente principal | Media | Raíz |
+| Problema | Severidad | Archivo(s) | Estado |
+|----------|-----------|-----------|--------|
+| Contraseña hardcodeada en frontend | Crítica | `src/InventoryApp.tsx:166` | 🗑️ Archivo eliminado |
+| Nombres de campos form/API desalineados (`name` vs `nombre`) | **Crítica** | `InventoryApp.tsx modal` | ✅ Corregido v1.1 |
+| GTIN readOnly bloqueaba entrada manual desde el 1er char | Alta | `InventoryApp.tsx modal` | ✅ Corregido v1.1 — `gtinLocked` flag |
+| Escáner no funcionaba dentro del modal | Alta | `InventoryApp.tsx` | ✅ Corregido v1.1 — campo dedicado `scanInputRef` |
+| `any[]` en estados React | Alta | `components/InventoryApp.tsx` | ✅ Tipado con `InvRow`, `GroupedItem`, `ProductForm` |
+| Inline styles en todo el componente | Alta | Todos los `.tsx` | Pendiente (Tailwind CSS) |
+| `alert()` y `confirm()` nativos | Media | `InventoryApp.tsx` | Pendiente (Toast/ConfirmDialog) |
+| Polling cada 3s en vez de WebSocket | Media | `InventoryApp.tsx` | Pendiente (Socket.io) |
+| Sin manejo de errores en fetch | Media | `InventoryApp.tsx` | Pendiente |
+| Sin loading states | Media | `InventoryApp.tsx` | Pendiente |
+| `Math.random()` para IDs | Media | `server.cjs` | Pendiente → `crypto.randomUUID()` |
+| `server.js` legacy activo | Media | Raíz | Pendiente eliminar |
+| Express 5 wildcard `*` → usar regex `/(.*)/` | **Bloqueante** | `server.cjs` | ✅ Corregido v1.1 |
+| Datos nulos en DB por bug form/API | Alta | `inventario_biorad.db` | ✅ Limpiados en v1.1 |
 
 ### 3.2 Base de Datos
 
@@ -173,13 +180,101 @@ const id = Math.random().toString(36).substr(2,9); // Colisiones posibles, prede
 
 ### 3.3 Infraestructura
 
-| Problema | Severidad |
-|----------|-----------|
-| `npm run dev` en producción (Vite dev server) | Crítica |
-| Sin `.env` para variables de entorno | Alta |
-| Sin proceso de build para el servidor | Alta |
-| Tauri no integrado funcionalmente | Media |
-| Sin CI/CD | Media |
+| Problema | Severidad | Estado |
+|----------|-----------|--------|
+| `npm run dev` en producción (Vite dev server) | Crítica | ✅ Corregido — `Iniciar.bat` usa `npm run build + node server.cjs` |
+| Sin `.env` para variables de entorno | Alta | Pendiente |
+| Sin proceso de build para el servidor | Alta | Pendiente (TypeScript server) |
+| Tauri no integrado funcionalmente | Media | Pendiente |
+| Sin CI/CD | Media | Pendiente |
+
+---
+
+## 3B. ARQUITECTURA UI ACTUAL — v1.1 (2026-05-09)
+
+### Flujo de Clasificación de Controles
+
+El modal "Clasificar Control" es el punto de entrada de todos los metadatos del sistema. **Si este flujo falla, toda la UI queda ciega.**
+
+```
+┌─────────────────────────────────────────────────────┐
+│  MODAL: Clasificar Control                          │
+│                                                     │
+│  [Campo de Escaneo — scanInputRef]                  │
+│   onKeyDown: captura pistola aunque es un <input>   │
+│   → parseGS1() → auto-rellena gtin, lot, exp        │
+│                                                     │
+│  [GTIN]  ← editable, gtinLocked=true si vino del   │
+│           escáner (cambia color, no bloquea)        │
+│  [Lote]  [Vencimiento AAMMDD]                       │
+│  [Sección] ← con datalist de secciones existentes   │
+│  [Nombre del Control] ← clave para gráficos         │
+│  [Detalle] [Temperatura]                            │
+│                                                     │
+│  POST /api/producto → { gtin, nombre, detalle,      │
+│                         pack, seccion, temperatura } │
+│  POST /api/inventario → { gtin, lot, expiration }   │
+└─────────────────────────────────────────────────────┘
+```
+
+**Bug crítico resuelto en v1.1:** El formulario enviaba `name`, `section`, `temp` pero el servidor esperaba `nombre`, `seccion`, `temperatura`. Todos los productos se guardaban con `null` en esos campos. La DB y el servidor ahora tienen protección: `GET /api/producto/:gtin` solo retorna productos con `nombre IS NOT NULL`.
+
+### Modelo de Datos en UI (tipos TypeScript activos)
+
+```typescript
+// src/components/InventoryApp.tsx
+
+interface ProductForm {
+  gtin: string; lot: string; exp: string;
+  nombre: string; detalle: string; seccion: string;
+  pack: string; temperatura: string;
+  // ❌ NUNCA usar: name, section, temp (fueron el bug crítico)
+}
+
+interface InvRow {
+  id: string; gtin: string; lot: string; expiration: string; usuario: string;
+  nombre?: string; detalle?: string; seccion?: string; temperatura?: string;
+}
+
+interface GroupedItem {
+  gtin: string; lot: string; nombre: string; detalle: string; seccion: string;
+  expiration: string; cantidad: number; itemIds: string[];
+  // cantidad = COUNT de filas activas con mismo (gtin, lot)
+  // itemIds[0] = el primero a consumir (FIFO, orden por expiration ASC del server)
+}
+```
+
+### Tabla de Inventario (columnas actuales)
+
+| Columna | Fuente de datos | Lógica |
+|---------|----------------|--------|
+| NOMBRE | `maestro_productos.nombre` via JOIN | Agrupado — cada fila = 1 (gtin, lot) |
+| LOTE | `inventario.lot` | Identifica el lote físico |
+| FECHA VENCIMIENTO | `inventario.expiration` formateado | YYMMDD → DD/MM/YYYY |
+| CANTIDAD | COUNT de rows con mismo (gtin, lot) | Sube con escaneo, baja con Eliminar |
+| ESTADO | Calculado desde expiration | > 90d: Activo · 0-90d: Por Vencer · < 0d: Vencido |
+| ACCIÓN | PATCH /api/inventario/:id | Consume `itemIds[0]` — FIFO |
+
+### Sidebar de Secciones (viñetas)
+
+```
+SECCIONES DEL LABORATORIO
+  ▼ Hematología          [12]  ← count de items activos
+      · Liquichek Hematología  ← productos únicos con nombre != null
+      · Trilevel CBC
+  ▶ Química              [5]
+  ▶ Coagulación          [3]
+```
+
+Derivado completamente del estado `inventory` en runtime. Las secciones aparecen automáticamente cuando se registra el primer control. Condición: `i.seccion !== null && i.nombre !== null`.
+
+### Gráfico de Barras
+
+- **Fuente:** `inventory.filter(i => i.seccion === activeSection && i.nombre)`
+- **Agrupado por:** `i.nombre` (nombre del control)
+- **Valor Y:** count de unidades activas
+- **Filtrado:** Si `activeProduct !== null`, muestra solo ese producto
+- **Etiqueta:** `"Stock por control — {sección} › {producto}"`
 
 ---
 
@@ -200,6 +295,16 @@ Antes de proponer mejoras, reconocer lo que funciona correctamente:
 6. **Barcode buffer pattern** — el patrón de acumular teclas con timeout de 150ms es la forma estándar de capturar escáneres HID.
 
 7. **Glassmorphism UI** — la identidad visual es coherente y modern.
+
+8. **Single-process deployment** — Express sirve React build + API desde el mismo puerto 3000. Vite proxy en dev (`/api` → `localhost:3000`). URL relativa `/api` en frontend funciona en ambos entornos.
+
+9. **Modal scan field (`scanInputRef`)** — campo `<input>` con `onKeyDown` propio que captura el escáner aunque el listener global excluye `HTMLInputElement`. Permite pistolar directamente dentro del modal de clasificación.
+
+10. **Section tree reactivo** — las secciones del sidebar se derivan del estado `inventory` en tiempo de ejecución. No hay lista hardcodeada. Aparecen solas al registrar el primer control de cada sección.
+
+11. **Agrupación (gtin, lot)** — cada fila de la tabla = un lote físico de un producto. `cantidad` = unidades activas. `Eliminar` descuenta exactamente 1 unidad (FIFO por `itemIds[0]`).
+
+12. **`GET /api/producto/:gtin` guarda de nulos** — solo retorna producto si `nombre IS NOT NULL`. Esto garantiza que productos mal clasificados abran el modal de reclasificación al siguiente escaneo.
 
 ---
 
@@ -804,16 +909,23 @@ function useBarcodeScanner(onScan: (code: string) => void, enabled = true) {
 
 ### Fase 2 — Refactoring Frontend (Semana 2–4)
 
-- [ ] Definir todos los tipos TypeScript (eliminar `any`)
-- [ ] Instalar y configurar TanStack Query
+- [x] Definir tipos TypeScript core: `InvRow`, `GroupedItem`, `ProductForm`
+- [x] Eliminar archivos legacy: `src/InventoryApp.tsx`, `src/components/InventoryInput.tsx`
+- [x] Tabla con columnas: Nombre · Lote · Fecha Vencimiento · Cantidad · Estado · Acción
+- [x] Estado calculado: Activo / Por Vencer / Vencido (basado en días a expiración)
+- [x] Sidebar con árbol de secciones → sub-viñetas por control
+- [x] Escaneo dentro del modal (campo `scanInputRef` con buffer propio)
+- [x] Corrección bug `readOnly` en GTIN (flag `gtinLocked`)
+- [x] Corrección bug nombres de campos form/API (`nombre`, `seccion`, `temperatura`)
+- [ ] Instalar y configurar TanStack Query (reemplazar polling + fetch inline)
 - [ ] Instalar y configurar Zustand para estado global
-- [ ] Instalar Tailwind CSS v4
-- [ ] Crear sistema de Toast notifications
-- [ ] Crear componente ConfirmDialog
+- [ ] Instalar Tailwind CSS v4 (reemplazar inline styles)
+- [ ] Crear sistema de Toast notifications (reemplazar `alert()`)
+- [ ] Crear componente ConfirmDialog (reemplazar `confirm()`)
 - [ ] Extraer lógica de barcode scanner a `useBarcodeScanner` hook
 - [ ] Dividir InventoryApp en sub-componentes (< 150 líneas c/u)
 - [ ] Crear `DataTable` reutilizable con paginación
-- [ ] Eliminar archivos legacy: `src/InventoryApp.tsx`, `src/components/InventoryInput.tsx`, `server.js`
+- [ ] Eliminar `server.js` legacy
 
 ### Fase 3 — Backend Production-Ready (Semana 3–5)
 

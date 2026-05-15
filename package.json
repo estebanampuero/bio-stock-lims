@@ -1,7 +1,7 @@
 {
   "name": "bio-stock",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,13 +9,16 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "server": "node server.cjs",
-    "start": "npm run build && node server.cjs"
+    "start": "npm run build && node server.cjs",
+    "build:exe": "npm run build && node scripts/build-exe.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "express-rate-limit": "^7.5.1",
     "lucide-react": "^1.14.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -25,10 +28,23 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/bcryptjs": "^2.4.6",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "pkg": "^5.8.1",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
+  },
+  "pkg": {
+    "scripts": "server.cjs",
+    "assets": [
+      "dist/**/*",
+      "node_modules/sqlite3/build/Release/node_sqlite3.node"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "release"
   }
 }

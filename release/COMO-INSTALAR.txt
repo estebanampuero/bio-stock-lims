@@ -1,0 +1,42 @@
+BIO-STOCK LIMS — Instrucciones de Instalacion
+=============================================
+
+CONTENIDO DE ESTA CARPETA:
+  BioStock-LIMS.exe     -> Servidor (Node.js + React + SQLite incluidos)
+  node_sqlite3.node     -> Modulo SQLite (NO mover, mantener junto al .exe)
+  Iniciar.bat           -> Lanzador con doble clic
+  COMO-INSTALAR.txt     -> Este archivo
+
+REQUISITOS:
+  - Windows 10 o Windows 11 (64 bits)
+  - NO requiere instalar Node.js, Python ni nada mas
+  - Puerto 3000 disponible
+
+PRIMERA EJECUCION:
+  1. Copiar la carpeta completa a C:\BioStock\
+  2. Doble clic en "Iniciar.bat"
+  3. Abrir navegador en:  http://localhost:3000
+  4. Login inicial: usuario "admin", PIN "1234"
+  5. Cambiar el PIN del admin desde Personal
+
+ACCESO DESDE OTROS PCs DE LA RED:
+  - Reemplazar "localhost" por la IP del servidor
+  - Ejemplo: http://192.168.1.100:3000
+  - Si Windows Firewall bloquea, permitir entrada en puerto 3000:
+       New-NetFirewallRule -DisplayName "BioStock" -Direction Inbound `
+         -LocalPort 3000 -Protocol TCP -Action Allow
+
+EJECUTAR COMO SERVICIO WINDOWS (auto-start al encender el PC):
+  - Descargar NSSM desde https://nssm.cc/download
+  - PowerShell como Administrador:
+       nssm install BioStock "C:\BioStock\BioStock-LIMS.exe"
+       nssm set BioStock AppDirectory "C:\BioStock"
+       nssm set BioStock Start SERVICE_AUTO_START
+       nssm start BioStock
+
+BASE DE DATOS:
+  - Se crea automaticamente en la carpeta del .exe:
+       inventario_biorad.db
+  - RESPALDAR este archivo diariamente (USB, NAS o carpeta de red)
+
+VERSION: 1.1.0
