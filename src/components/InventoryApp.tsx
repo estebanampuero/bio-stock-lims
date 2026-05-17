@@ -9,7 +9,30 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 import { parseGS1 } from "../utils/gs1Parser";
 import { parseDiuresisBarcode } from "../utils/diuresisParser";
 
-const API = "/api";
+// ── HTTP client con JWT ──────────────────────────────────────────────────────
+const TOKEN_KEY = "biostock_token";
+const USER_KEY  = "biostock_user";
+
+let authToken: string | null = (typeof localStorage !== "undefined") ? localStorage.getItem(TOKEN_KEY) : null;
+
+function setToken(t: string | null) {
+  authToken = t;
+  if (t) localStorage.setItem(TOKEN_KEY, t);
+  else   localStorage.removeItem(TOKEN_KEY);
+}
+
+async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(opts.headers || {});
+  if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
+  if (opts.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const res = await fetch(`/api/v1${path}`, { ...opts, headers });
+  if (res.status === 401 && path !== "/login") {
+    setToken(null);
+    localStorage.removeItem(USER_KEY);
+    if (!window.location.search.includes("noreload")) window.location.reload();
+  }
+  return res;
+}
 
 // ── Utilidades ────────────────────────────────────────────────────────────────
 
@@ -196,7 +219,7 @@ export default function InventoryApp() {
   const [showProtoModal, setShowProtoModal] = useState(false);
   const [editProto, setEditProto]       = useState<Protocolo|null>(null);
   const [protoForm, setProtoForm]       = useState({ titulo:"", seccion:"", contenido:"" });
-  const [expandedProto, setExpandedProto] = useState<string|null>(null);
+  const [viewProto, setViewProto] = useState<Protocolo|null>(null);
   const [expandedProtoSecs, setExpandedProtoSecs] = useState<Set<string>>(new Set());
 
   // ─ Anexos
@@ -214,9 +237,60 @@ export default function InventoryApp() {
   const [histFiltros, setHistFiltros]   = useState({ fecha:"", peticion:"", nombre:"" });
   const [buscandoHist, setBuscandoHist] = useState(false);
 
+  // ─ Force-PIN-change
+  const [showPinChange, setShowPinChange] = useState(false);
+  const [pinActual, setPinActual] = useState("");
+  const [pinNuevo, setPinNuevo]   = useState("");
+  const [pinNuevo2, setPinNuevo2] = useState("");
+
+  // ─ Toast system
+  const [toasts, setToasts] = useState<{ id: number; msg: string; kind: "success"|"error"|"info" }[]>([]);
+  const toast = (msg: string, kind: "success"|"error"|"info" = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts(t => [...t, { id, msg, kind }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000);
+  };
+
+  // ─ ConfirmDialog promise-based
+  const [confirmState, setConfirmState] = useState<{ open: boolean; title: string; msg: string; kind: "danger"|"default"; resolve?: (v: boolean) => void }>({ open: false, title: "", msg: "", kind: "default" });
+  const confirmDialog = (msg: string, opts?: { title?: string; kind?: "danger"|"default" }): Promise<boolean> => {
+    return new Promise(resolve => {
+      setConfirmState({ open: true, title: opts?.title || "Confirmar", msg, kind: opts?.kind || "default", resolve });
+    });
+  };
+  const handleConfirmClose = (result: boolean) => {
+    confirmState.resolve?.(result);
+    setConfirmState(s => ({ ...s, open: false }));
+  };
+
+  // ─ Anomaly check de diuresis
+  const [anomalyWarning, setAnomalyWarning] = useState<string|null>(null);
+
   const barcodeBuffer  = useRef("");
   const scanInputRef   = useRef<HTMLInputElement>(null);
   const diurScanRef    = useRef<HTMLInputElement>(null);
+
+  // ── Restaurar sesión desde localStorage ──────────────────────────────────────
+  useEffect(() => {
+    const saved = localStorage.getItem(USER_KEY);
+    if (saved && authToken) {
+      try {
+        JSON.parse(saved); // valida formato
+        // Verificar token con /api/me antes de confiar
+        apiFetch("/me").then(async r => {
+          if (r.ok) {
+            const fresh = await r.json();
+            setCurrentUser(fresh);
+            setShowLogin(false);
+            if (fresh.must_change_pin) setShowPinChange(true);
+            if (fresh.rol === "TECNICO") setView("Anexos");
+            else if (fresh.rol === "TOMA_MUESTRA") setView("Diuresis");
+            else setView("Dashboard");
+          }
+        }).catch(() => {});
+      } catch (_) {}
+    }
+  }, []);
 
   // ── Permisos ─────────────────────────────────────────────────────────────────
   const isAdmin     = currentUser?.rol === "ADMIN";
@@ -239,16 +313,16 @@ export default function InventoryApp() {
     if (!currentUser) return;
     try {
       const [inv, cfg, lg, prot, anx, diur] = await Promise.all([
-        fetch(`${API}/inventario`),
-        fetch(`${API}/config`),
-        fetch(`${API}/logs`),
-        fetch(`${API}/protocolos`),
-        fetch(`${API}/anexos`),
-        fetch(`${API}/diuresis/hoy`),
+        apiFetch(`/inventario`),
+        apiFetch(`/config`),
+        apiFetch(`/logs`),
+        apiFetch(`/protocolos`),
+        apiFetch(`/anexos`),
+        apiFetch(`/diuresis/hoy`),
       ]);
       if (inv.ok)  setInventory(await inv.json());
       if (cfg.ok)  { const d = await cfg.json(); setSecciones(d.secciones.filter((s:any) => s.nombre)); setUsuarios(d.usuarios); }
-      if (lg.ok)   setLogs(await lg.json());
+      if (lg.ok)   { const d = await lg.json(); setLogs(Array.isArray(d) ? d : d.rows || []); }
       if (prot.ok) setProtocolos(await prot.json());
       if (anx.ok)  setAnexos(await anx.json());
       if (diur.ok) setDiuresisHoy(await diur.json());
@@ -288,7 +362,7 @@ export default function InventoryApp() {
   // ── Flujo inventario ─────────────────────────────────────────────────────────
   const procesarEscaneo = async (code: string) => {
     const p = parseGS1(code) || { gtin: code.replace(/\D/g,"").slice(-14) || code, lot:"", expiration:"" };
-    const res = await fetch(`${API}/producto/${p.gtin}`);
+    const res = await apiFetch(`/producto/${p.gtin}`);
     const existe = await res.json();
     if (existe) { await registrarEnDB(p); setActiveSection(existe.seccion); setExpandedSections(prev => new Set([...prev, existe.seccion])); }
     else { setForm({ ...EMPTY_FORM, gtin:p.gtin, lot:p.lot, exp:p.expiration, seccion:activeSection||"" }); setGtinLocked(true); setExpError(null); setProductoExiste(false); setShowModal(true); }
@@ -301,7 +375,7 @@ export default function InventoryApp() {
     if (code.length < 5) return;
     const parsed = parseGS1(code);
     const gtin = parsed?.gtin || code.replace(/\D/g,"").slice(-14) || code;
-    const res = await fetch(`${API}/producto/${gtin}`);
+    const res = await apiFetch(`/producto/${gtin}`);
     const existe = await res.json();
     if (existe) { setForm(f => ({ ...f, gtin, lot:parsed?.lot||f.lot, exp:parsed?.expiration||f.exp, nombre:existe.nombre, detalle:existe.detalle||"", seccion:existe.seccion, temperatura:existe.temperatura||"Refrigerado", preparacion:existe.preparacion||"" })); setProductoExiste(true); }
     else { setForm(f => ({ ...f, gtin, lot:parsed?.lot||f.lot, exp:parsed?.expiration||f.exp })); setProductoExiste(false); }
@@ -309,13 +383,13 @@ export default function InventoryApp() {
   };
 
   const registrarEnDB = async (p: { gtin:string; lot:string; expiration:string }) => {
-    await fetch(`${API}/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...p, scanDate:new Date().toISOString(), usuario:currentUser.nombre }) });
+    await apiFetch(`/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...p, scanDate:new Date().toISOString(), usuario:currentUser.nombre }) });
     fetchData();
   };
 
   const verificarGTINManual = async (gtin: string) => {
     if (!gtin || gtin.length < 8) { setProductoExiste(false); return; }
-    const res = await fetch(`${API}/producto/${gtin}`); const existe = await res.json();
+    const res = await apiFetch(`/producto/${gtin}`); const existe = await res.json();
     if (existe) { setForm(f => ({ ...f, nombre:existe.nombre, detalle:existe.detalle||"", seccion:existe.seccion, temperatura:existe.temperatura||"Refrigerado", preparacion:existe.preparacion||"" })); setProductoExiste(true); }
     else setProductoExiste(false);
   };
@@ -324,10 +398,10 @@ export default function InventoryApp() {
 
   const guardarProducto = async () => {
     const err = validarFechaGS1(form.exp); setExpError(err); if (err) return;
-    if (!form.gtin || !form.lot) { alert("GTIN y Lote son obligatorios."); return; }
-    if (!productoExiste && (!form.nombre || !form.seccion)) { alert("Nombre y Sección son obligatorios para clasificar."); return; }
+    if (!form.gtin || !form.lot) { toast("GTIN y Lote son obligatorios.", "error"); return; }
+    if (!productoExiste && (!form.nombre || !form.seccion)) { toast("Nombre y Sección son obligatorios para clasificar.", "error"); return; }
     if (!productoExiste || isAdmin) {
-      await fetch(`${API}/producto`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:form.gtin, nombre:form.nombre, detalle:form.detalle, pack:form.pack, seccion:form.seccion, temperatura:form.temperatura, preparacion:form.preparacion, usuario:currentUser.nombre }) });
+      await apiFetch(`/producto`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:form.gtin, nombre:form.nombre, detalle:form.detalle, pack:form.pack, seccion:form.seccion, temperatura:form.temperatura, preparacion:form.preparacion, usuario:currentUser.nombre }) });
     }
     await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
     cerrarModal();
@@ -343,49 +417,49 @@ export default function InventoryApp() {
   const guardarEdicion = async () => {
     if (!editTarget) return;
     const err = validarFechaGS1(editForm.newExp); setEditExpError(err); if (err) return;
-    await fetch(`${API}/producto/${editTarget.gtin}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ nombre:editForm.nombre, detalle:editForm.detalle, pack:editForm.pack, seccion:editForm.seccion, temperatura:editForm.temperatura, preparacion:editForm.preparacion, usuario:currentUser.nombre }) });
+    await apiFetch(`/producto/${editTarget.gtin}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ nombre:editForm.nombre, detalle:editForm.detalle, pack:editForm.pack, seccion:editForm.seccion, temperatura:editForm.temperatura, preparacion:editForm.preparacion, usuario:currentUser.nombre }) });
     if (editForm.newLot !== editTarget.lot || editForm.newExp !== editTarget.expiration) {
-      await fetch(`${API}/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser.nombre }) });
+      await apiFetch(`/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser.nombre }) });
     }
     setShowEditModal(false); setEditTarget(null); fetchData();
     setActiveSection(editForm.seccion); setExpandedSections(prev => new Set([...prev, editForm.seccion]));
   };
 
   const eliminarProducto = async () => {
-    if (!editTarget || !confirm(`¿Eliminar "${editTarget.nombre}" y dar de baja su stock?`)) return;
-    await fetch(`${API}/producto/${editTarget.gtin}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    if (!editTarget || !await confirmDialog(`¿Eliminar "${editTarget.nombre}" y dar de baja su stock?`, { kind:"danger" })) return;
+    await apiFetch(`/producto/${editTarget.gtin}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
     setShowEditModal(false); setEditTarget(null); fetchData();
   };
 
   const consumirUnidad = async (g: GroupedItem) => {
-    if (!confirm(`¿Descontar 1 unidad de "${g.nombre}" (Lote: ${g.lot})?`)) return;
-    await fetch(`${API}/inventario/${g.itemIds[0]}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    if (!await confirmDialog(`¿Descontar 1 unidad de "${g.nombre}" (Lote: ${g.lot})?`, { kind:"danger" })) return;
+    await apiFetch(`/inventario/${g.itemIds[0]}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
     fetchData();
   };
 
   // ── Protocolos ───────────────────────────────────────────────────────────────
   const guardarProtocolo = async () => {
-    if (!protoForm.titulo.trim() || !protoForm.seccion.trim() || !protoForm.contenido.trim()) { alert("Título, sección y contenido son obligatorios."); return; }
-    if (editProto) await fetch(`${API}/protocolos/${editProto.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser.nombre }) });
-    else { await fetch(`${API}/protocolos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser.nombre }) }); setExpandedProtoSecs(p => new Set([...p, protoForm.seccion])); }
+    if (!protoForm.titulo.trim() || !protoForm.seccion.trim() || !protoForm.contenido.trim()) { toast("Título, sección y contenido son obligatorios.", "error"); return; }
+    if (editProto) await apiFetch(`/protocolos/${editProto.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser.nombre }) });
+    else { await apiFetch(`/protocolos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser.nombre }) }); setExpandedProtoSecs(p => new Set([...p, protoForm.seccion])); }
     setShowProtoModal(false); fetchData();
   };
   const eliminarProtocolo = async (p: Protocolo) => {
-    if (!confirm(`¿Eliminar "${p.titulo}"?`)) return;
-    await fetch(`${API}/protocolos/${p.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    if (!await confirmDialog(`¿Eliminar "${p.titulo}"?`, { kind:"danger" })) return;
+    await apiFetch(`/protocolos/${p.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
     fetchData();
   };
 
   // ── Anexos ───────────────────────────────────────────────────────────────────
   const guardarAnexo = async () => {
-    if (!anexoForm.servicio.trim() || !anexoForm.numero.trim()) { alert("Servicio y Número son obligatorios."); return; }
-    if (editAnexo) await fetch(`${API}/anexos/${editAnexo.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser.nombre }) });
-    else await fetch(`${API}/anexos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser.nombre }) });
+    if (!anexoForm.servicio.trim() || !anexoForm.numero.trim()) { toast("Servicio y Número son obligatorios.", "error"); return; }
+    if (editAnexo) await apiFetch(`/anexos/${editAnexo.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser.nombre }) });
+    else await apiFetch(`/anexos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser.nombre }) });
     setShowAnexoModal(false); setEditAnexo(null); setAnexoForm({ servicio:"", salas:"", numero:"" }); fetchData();
   };
   const eliminarAnexo = async (a: Anexo) => {
-    if (!confirm(`¿Eliminar el anexo de "${a.servicio}"?`)) return;
-    await fetch(`${API}/anexos/${a.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    if (!await confirmDialog(`¿Eliminar el anexo de "${a.servicio}"?`, { kind:"danger" })) return;
+    await apiFetch(`/anexos/${a.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
     fetchData();
   };
 
@@ -399,16 +473,43 @@ export default function InventoryApp() {
     setDiuresisForm(f => ({ ...f, num_peticion:p.peticion||f.num_peticion, rut_paciente:p.rut||f.rut_paciente, nombre_paciente:p.nombre||f.nombre_paciente }));
   };
 
+  // ── Anomaly detection: cuando hay petición + valor, comparar con histórico
+  useEffect(() => {
+    const peticion = diuresisForm.num_peticion.trim();
+    const valStr = diuresisForm.diuresis_ml.trim();
+    if (!peticion || !valStr) { setAnomalyWarning(null); return; }
+    const val = parseFloat(valStr);
+    if (isNaN(val)) { setAnomalyWarning(null); return; }
+    const id = setTimeout(async () => {
+      try {
+        const r = await apiFetch(`/diuresis/stats/${encodeURIComponent(peticion)}`);
+        if (!r.ok) { setAnomalyWarning(null); return; }
+        const s = await r.json();
+        if (s.n >= 3 && s.std !== null && s.mean !== null) {
+          const z = Math.abs(val - s.mean) / Math.max(s.std, 1);
+          if (z > 2) {
+            setAnomalyWarning(`⚠ Anomalía: ${val} ml está ${z.toFixed(1)}σ del promedio histórico (${s.mean} ± ${s.std} ml, n=${s.n}). Verificar.`);
+          } else {
+            setAnomalyWarning(null);
+          }
+        } else {
+          setAnomalyWarning(null);
+        }
+      } catch (_) { setAnomalyWarning(null); }
+    }, 600);
+    return () => clearTimeout(id);
+  }, [diuresisForm.num_peticion, diuresisForm.diuresis_ml]);
+
   const guardarDiuresis = async () => {
-    if (!diuresisForm.num_peticion.trim()) { alert("N° Petición es obligatorio."); return; }
-    if (!diuresisForm.baja_motivo.trim()) { alert("Motivo de Baja es obligatorio."); return; }
-    await fetch(`${API}/diuresis`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...diuresisForm, usuario:currentUser.nombre }) });
+    if (!diuresisForm.num_peticion.trim()) { toast("N° Petición es obligatorio.", "error"); return; }
+    if (!diuresisForm.baja_motivo.trim()) { toast("Motivo de Baja es obligatorio.", "error"); return; }
+    await apiFetch(`/diuresis`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...diuresisForm, usuario:currentUser.nombre }) });
     setDiuresisForm({ ...EMPTY_DIURESIS }); fetchData();
   };
 
   const eliminarDiuresis = async (id: string) => {
-    if (!confirm("¿Eliminar este registro?")) return;
-    await fetch(`${API}/diuresis/${id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    if (!await confirmDialog("¿Eliminar este registro?", { kind:"danger" })) return;
+    await apiFetch(`/diuresis/${id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
     fetchData();
   };
 
@@ -419,8 +520,8 @@ export default function InventoryApp() {
       if (histFiltros.fecha) p.set("fecha", histFiltros.fecha);
       if (histFiltros.peticion) p.set("peticion", histFiltros.peticion);
       if (histFiltros.nombre) p.set("nombre", histFiltros.nombre);
-      const res = await fetch(`${API}/diuresis/historico?${p}`);
-      if (res.ok) setDiuresisHist(await res.json());
+      const res = await apiFetch(`/diuresis/historico?${p}`);
+      if (res.ok) { const d = await res.json(); setDiuresisHist(Array.isArray(d) ? d : d.rows || []); }
     } finally { setBuscandoHist(false); }
   };
 
@@ -428,32 +529,55 @@ export default function InventoryApp() {
 
   // ── Auth ─────────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
-    if (!usernameInput || !pinInput) return alert("Ingrese usuario y clave.");
-    const res = await fetch(`${API}/login`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ nombre:usernameInput, pin:pinInput }) });
+    if (!usernameInput || !pinInput) return toast("Ingrese usuario y clave.", "error");
+    const res = await apiFetch(`/login`, { method:"POST", body:JSON.stringify({ nombre:usernameInput, pin:pinInput }) });
     const data = await res.json();
     if (data.success) {
+      setToken(data.token);
+      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
       setCurrentUser(data.user); setShowLogin(false); setPinInput("");
+      if (data.user.must_change_pin) setShowPinChange(true);
       const rol = data.user.rol;
       if (rol === "TECNICO") setView("Anexos");
       else if (rol === "TOMA_MUESTRA") setView("Diuresis");
       else setView("Dashboard");
-    } else alert("❌ Usuario o Clave incorrectos");
+    } else toast(data.message || "Usuario o Clave incorrectos", "error");
   };
 
   const handleLogout = async () => {
-    await fetch(`${API}/logout`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) }).catch(()=>{});
+    await apiFetch(`/logout`, { method:"POST", body:JSON.stringify({}) }).catch(()=>{});
+    setToken(null);
+    localStorage.removeItem(USER_KEY);
     setCurrentUser(null); setShowLogin(true); setUsernameInput(""); setPinInput("");
   };
 
+  const cambiarPin = async () => {
+    if (!pinActual || !pinNuevo) return toast("Complete ambos campos.", "error");
+    if (pinNuevo !== pinNuevo2) return toast("Los PIN nuevos no coinciden.", "error");
+    if (pinNuevo.length < 4) return toast("PIN nuevo mínimo 4 caracteres.", "error");
+    if (pinNuevo === "1234" || pinNuevo === "0000") return toast("PIN demasiado débil.", "error");
+    const res = await apiFetch(`/cambiar-pin`, { method:"POST", body:JSON.stringify({ pinActual, pinNuevo }) });
+    const data = await res.json();
+    if (data.success) {
+      setShowPinChange(false); setPinActual(""); setPinNuevo(""); setPinNuevo2("");
+      setCurrentUser((u:any) => ({ ...u, must_change_pin: false }));
+      toast("PIN actualizado correctamente.", "success");
+    } else toast(data.message || "No se pudo actualizar el PIN.", "error");
+  };
+
   const crearUsuario = async () => {
-    if (!newUser.nombre || !newUser.pin) return alert("Datos incompletos.");
-    await fetch(`${API}/usuarios`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...newUser, adminUser:currentUser.nombre }) });
-    setNewUser({ nombre:"", rol:"TECNICO", pin:"" }); fetchData();
+    if (!newUser.nombre || !newUser.pin) return toast("Datos incompletos.", "error");
+    const res = await apiFetch(`/usuarios`, { method:"POST", body:JSON.stringify(newUser) });
+    const data = await res.json();
+    if (data.success) { toast(`Usuario "${newUser.nombre}" creado.`, "success"); setNewUser({ nombre:"", rol:"TECNICO", pin:"" }); fetchData(); }
+    else toast(data.message || "Error al crear usuario.", "error");
   };
 
   // ── Datos derivados ───────────────────────────────────────────────────────────
   const allSecNames = [...new Set([...secciones.map(s=>s.nombre), ...inventory.map(i=>i.seccion).filter(Boolean) as string[]])];
   const sectionTree = allSecNames.map(n => ({ nombre:n, count:inventory.filter(i=>i.seccion===n).length, productos:[...new Set(inventory.filter(i=>i.seccion===n).map(i=>i.nombre).filter(Boolean))] as string[] })).filter(s=>s.count>0);
+  // Lista de nombres únicos para el dropdown del modal — derivada del stock activo
+  const productNames = [...new Set(inventory.map(i => i.nombre).filter(Boolean) as string[])].sort();
 
   const filteredInv = inventory.filter(i => {
     if (activeSection && i.seccion !== activeSection) return false;
@@ -618,7 +742,7 @@ export default function InventoryApp() {
                           <td style={{ padding:"12px 13px", textAlign:"center" }}><EstadoBadge estado={getEstado(g.expiration)}/></td>
                           <td style={{ padding:"12px 13px", textAlign:"center" }}>
                             <div style={{ display:"flex", gap:5, justifyContent:"center", flexWrap:"wrap" }}>
-                              {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); fetch(`${API}/log-accion`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({usuario:currentUser.nombre,accion:"VER PREPARACIÓN",detalles:`${g.nombre} | ${g.lot}`})}).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
+                              {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); apiFetch(`/log-accion`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({usuario:currentUser.nombre,accion:"VER PREPARACIÓN",detalles:`${g.nombre} | ${g.lot}`})}).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
                               {isAdmin && <button onClick={()=>abrirEdicion(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
                               {canConsumir && <button onClick={()=>consumirUnidad(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>− Consumir</button>}
                             </div>
@@ -706,6 +830,11 @@ export default function InventoryApp() {
                       <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>OBSERVACIÓN RECHAZO</div><input value={diuresisForm.obs_rechazo} onChange={e=>setDiuresisForm(f=>({...f,obs_rechazo:e.target.value}))} placeholder="Opcional" style={inp}/></div>
                       <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>MOTIVO VIH</div><input value={diuresisForm.motivo_vih} onChange={e=>setDiuresisForm(f=>({...f,motivo_vih:e.target.value}))} placeholder="Opcional" style={inp}/></div>
                     </div>
+                    {anomalyWarning && (
+                      <div style={{ background:"rgba(245,158,11,0.08)", border:"1px solid rgba(245,158,11,0.3)", borderRadius:10, padding:"10px 14px", marginBottom:12, color:"#92400e", fontSize:"12px", fontWeight:700, lineHeight:1.5 }}>
+                        {anomalyWarning}
+                      </div>
+                    )}
                     <button onClick={guardarDiuresis} style={{ padding:"12px 24px", background:"#005a9c", color:"white", border:"none", borderRadius:10, fontWeight:800, cursor:"pointer", fontSize:"13px", boxShadow:"0 4px 14px rgba(0,90,156,0.3)" }}>GUARDAR REGISTRO</button>
                   </div>
                 )}
@@ -788,26 +917,24 @@ export default function InventoryApp() {
           const query = protSearch.trim().toLowerCase();
           const protoSecs = [...new Set(protocolos.map(p=>p.seccion))].sort();
           const filtered = query ? protocolos.filter(p=>p.titulo.toLowerCase().includes(query)||p.contenido.toLowerCase().includes(query)||p.seccion.toLowerCase().includes(query)) : null;
-          const ProtoCard = ({ p }: { p: Protocolo }) => {
-            const expanded = expandedProto === p.id;
-            const preview = p.contenido.length > 200 ? p.contenido.slice(0,200)+"…" : p.contenido;
-            return (
-              <div style={{ ...glass, padding:"16px 18px", marginBottom:10 }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontWeight:800, color:"#1e293b", fontSize:"14px", marginBottom:2 }}>{p.titulo}</div>
-                    <div style={{ fontSize:"11px", color:"#94a3b8" }}>{p.autor} · {new Date(p.updated_at).toLocaleDateString("es-CL")}</div>
-                  </div>
-                  <div style={{ display:"flex", gap:6, flexShrink:0 }}>
-                    {canEditProto && <button onClick={()=>{ setEditProto(p); setProtoForm({titulo:p.titulo,seccion:p.seccion,contenido:p.contenido}); setShowProtoModal(true); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
-                    {isAdmin && <button onClick={()=>eliminarProtocolo(p)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.05)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Trash2 size={11}/></button>}
-                  </div>
-                </div>
-                <div style={{ marginTop:10, fontSize:"13px", color:"#334155", lineHeight:1.65 }}>{expanded?<div style={{ whiteSpace:"pre-wrap" }}>{p.contenido}</div>:<div>{preview}</div>}</div>
-                {p.contenido.length > 200 && <button onClick={()=>setExpandedProto(expanded?null:p.id)} style={{ marginTop:8, background:"none", border:"none", color:"#005a9c", fontWeight:700, fontSize:"12px", cursor:"pointer", padding:0 }}>{expanded?"▲ Cerrar":"▼ Ver completo"}</button>}
+          const ProtoRow = ({ p }: { p: Protocolo }) => (
+            <div
+              onClick={()=>setViewProto(p)}
+              style={{ ...glass, padding:"12px 16px", marginBottom:8, display:"flex", alignItems:"center", gap:12, cursor:"pointer", transition:"all 0.15s" }}
+              onMouseEnter={e=>{ (e.currentTarget as HTMLDivElement).style.background = "rgba(0,90,156,0.06)"; }}
+              onMouseLeave={e=>{ (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.72)"; }}
+            >
+              <FileText size={16} color="#005a9c" style={{ flexShrink:0 }}/>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontWeight:700, color:"#1e293b", fontSize:"14px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.titulo}</div>
+                <div style={{ fontSize:"11px", color:"#94a3b8" }}>{p.autor} · {new Date(p.updated_at).toLocaleDateString("es-CL")}</div>
               </div>
-            );
-          };
+              <div style={{ display:"flex", gap:6, flexShrink:0 }} onClick={e=>e.stopPropagation()}>
+                {canEditProto && <button onClick={()=>{ setEditProto(p); setProtoForm({titulo:p.titulo,seccion:p.seccion,contenido:p.contenido}); setShowProtoModal(true); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
+                {isAdmin && <button onClick={()=>eliminarProtocolo(p)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.05)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Trash2 size={11}/></button>}
+              </div>
+            </div>
+          );
           return (
             <div style={{ maxWidth:860 }}>
               <SectionHead title="Protocolos del Laboratorio" icon={<FileText/>}
@@ -820,7 +947,7 @@ export default function InventoryApp() {
               </div>
               {filtered
                 ? filtered.length===0 ? <div style={{ ...glass, padding:40, textAlign:"center", color:"#94a3b8" }}><p style={{ fontWeight:700, margin:0 }}>Sin resultados para "{protSearch}"</p></div>
-                  : <>{<div style={{ fontSize:"12px", color:"#64748b", fontWeight:700, marginBottom:14 }}>{filtered.length} resultado{filtered.length!==1?"s":""}</div>}{filtered.map(p=><ProtoCard key={p.id} p={p}/>)}</>
+                  : <>{<div style={{ fontSize:"12px", color:"#64748b", fontWeight:700, marginBottom:14 }}>{filtered.length} resultado{filtered.length!==1?"s":""}</div>}{filtered.map(p=><ProtoRow key={p.id} p={p}/>)}</>
                 : protoSecs.length===0
                   ? <div style={{ ...glass, padding:50, textAlign:"center", color:"#94a3b8" }}><FileText size={40} style={{ opacity:0.2, marginBottom:12 }}/><p style={{ fontWeight:700, margin:0 }}>Sin protocolos</p>{canEditProto&&<p style={{ fontSize:"13px", margin:"8px 0 0" }}>Clic en "Nuevo Protocolo" para comenzar</p>}</div>
                   : protoSecs.map(sec => {
@@ -831,7 +958,7 @@ export default function InventoryApp() {
                             style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 16px", background:isOpen?"rgba(0,90,156,0.07)":"rgba(255,255,255,0.6)", border:"1px solid rgba(0,90,156,0.1)", borderRadius:isOpen?"12px 12px 0 0":"12px", cursor:"pointer", fontWeight:800, color:"#005a9c", fontSize:"13px", backdropFilter:"blur(10px)" }}>
                             <span style={{ display:"flex", alignItems:"center", gap:8 }}>{isOpen?<ChevronDown size={14}/>:<ChevronRight size={14}/>}{sec}<span style={{ fontWeight:600, fontSize:"11px", background:"rgba(0,90,156,0.1)", padding:"2px 8px", borderRadius:20 }}>{protocolos.filter(p=>p.seccion===sec).length}</span></span>
                           </button>
-                          {isOpen && <div style={{ border:"1px solid rgba(0,90,156,0.1)", borderTop:"none", borderRadius:"0 0 12px 12px", padding:12, background:"rgba(255,255,255,0.4)" }}>{protocolos.filter(p=>p.seccion===sec).map(p=><ProtoCard key={p.id} p={p}/>)}</div>}
+                          {isOpen && <div style={{ border:"1px solid rgba(0,90,156,0.1)", borderTop:"none", borderRadius:"0 0 12px 12px", padding:12, background:"rgba(255,255,255,0.4)" }}>{protocolos.filter(p=>p.seccion===sec).map(p=><ProtoRow key={p.id} p={p}/>)}</div>}
                         </div>
                       );
                     })
@@ -866,7 +993,7 @@ export default function InventoryApp() {
                     <tr key={u.id} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
                       <td style={{ padding:"14px 18px", fontWeight:800, color:"#1e293b" }}>{u.nombre}</td>
                       <td style={{ padding:"14px 10px" }}><RolBadge rol={u.rol}/></td>
-                      <td style={{ padding:"14px 10px" }}>{u.nombre!==currentUser.nombre&&<button onClick={()=>{ if(confirm(`¿Revocar acceso de ${u.nombre}?`)) fetch(`${API}/usuarios/${u.id}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({adminUser:currentUser.nombre})}).then(fetchData); }} style={{ color:"#ef4444", border:"none", background:"none", cursor:"pointer", fontWeight:800, fontSize:"12px" }}>REVOCAR</button>}</td>
+                      <td style={{ padding:"14px 10px" }}>{u.nombre!==currentUser.nombre&&<button onClick={async ()=>{ if(await confirmDialog(`¿Revocar acceso de ${u.nombre}?`, { kind:"danger" })) apiFetch(`/usuarios/${u.id}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({adminUser:currentUser.nombre})}).then(fetchData); }} style={{ color:"#ef4444", border:"none", background:"none", cursor:"pointer", fontWeight:800, fontSize:"12px" }}>REVOCAR</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -943,7 +1070,31 @@ export default function InventoryApp() {
                   </div>
                 : <>
                     <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>SECCIÓN *</div><input list="sec-list" value={form.seccion} onChange={e=>setForm(f=>({...f,seccion:e.target.value}))} style={inp}/><datalist id="sec-list">{secciones.map(s=><option key={s.nombre} value={s.nombre}/>)}</datalist></div>
-                    <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE DEL CONTROL *</div><input value={form.nombre} onChange={e=>setForm(f=>({...f,nombre:e.target.value}))} style={inp}/></div>
+                    <div>
+                      <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE DEL CONTROL *</div>
+                      <input
+                        list="prod-name-list"
+                        value={form.nombre}
+                        onChange={e=>{
+                          const val = e.target.value;
+                          setForm(f=>({ ...f, nombre: val }));
+                          // Si el nombre coincide con un control existente, auto-rellena los campos heredables
+                          const match = inventory.find(i => i.nombre === val && i.nombre);
+                          if (match) {
+                            setForm(f=>({
+                              ...f,
+                              nombre: val,
+                              detalle:     f.detalle     || match.detalle     || "",
+                              seccion:     f.seccion     || match.seccion     || "",
+                              temperatura: match.temperatura || f.temperatura,
+                              preparacion: f.preparacion || match.preparacion || "",
+                            }));
+                          }
+                        }}
+                        style={inp}
+                      />
+                      <datalist id="prod-name-list">{productNames.map(n => <option key={n} value={n}/>)}</datalist>
+                    </div>
                     <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={form.detalle} onChange={e=>setForm(f=>({...f,detalle:e.target.value}))} placeholder="[cantidad] x [ml]" style={inp}/></div>
                     <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>TEMPERATURA</div><select value={form.temperatura} onChange={e=>setForm(f=>({...f,temperatura:e.target.value}))} style={inp}><option>Refrigerado</option><option>Congelado</option><option>Ambiente</option></select></div>
                     <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>INSTRUCCIONES DE PREPARACIÓN</div><textarea value={form.preparacion} onChange={e=>setForm(f=>({...f,preparacion:e.target.value}))} rows={3} style={{ ...inp, resize:"vertical", lineHeight:1.5 }}/></div>
@@ -1033,6 +1184,43 @@ export default function InventoryApp() {
         </div>
       )}
 
+      {/* ══ MODAL: Visualizar Protocolo ══════════════════════════════════════ */}
+      {viewProto && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.6)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:3000 }} onClick={()=>setViewProto(null)}>
+          <div style={{ ...glass, background:"rgba(255,255,255,0.98)", padding:0, width:680, maxHeight:"88vh", display:"flex", flexDirection:"column" }} onClick={e=>e.stopPropagation()}>
+            {/* Header */}
+            <div style={{ padding:"22px 28px 16px", borderBottom:"1px solid rgba(0,0,0,0.06)" }}>
+              <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:14 }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                    <FileText size={20} color="#005a9c"/>
+                    <span style={{ fontSize:"11px", fontWeight:800, color:"#005a9c", background:"rgba(0,90,156,0.1)", padding:"3px 10px", borderRadius:20, letterSpacing:"0.4px" }}>{viewProto.seccion}</span>
+                  </div>
+                  <h2 style={{ margin:0, color:"#0f172a", fontSize:"22px", fontWeight:800, lineHeight:1.25 }}>{viewProto.titulo}</h2>
+                  <div style={{ marginTop:8, fontSize:"12px", color:"#64748b" }}>
+                    Autor: <strong style={{ color:"#334155" }}>{viewProto.autor}</strong> ·
+                    Última actualización: {new Date(viewProto.updated_at).toLocaleString("es-CL")}
+                  </div>
+                </div>
+                <button onClick={()=>setViewProto(null)} aria-label="Cerrar" style={{ background:"rgba(0,0,0,0.04)", border:"none", borderRadius:9, padding:8, cursor:"pointer", color:"#64748b", display:"flex", flexShrink:0 }}><X size={18}/></button>
+              </div>
+            </div>
+            {/* Contenido scrollable */}
+            <div style={{ padding:"22px 28px", overflowY:"auto", flex:1, fontSize:"14px", color:"#1e293b", lineHeight:1.75, whiteSpace:"pre-wrap" }}>
+              {viewProto.contenido}
+            </div>
+            {/* Footer con acciones */}
+            <div style={{ padding:"14px 28px", borderTop:"1px solid rgba(0,0,0,0.06)", display:"flex", justifyContent:"flex-end", gap:8, background:"rgba(0,0,0,0.02)" }}>
+              {canEditProto && (
+                <button onClick={()=>{ setEditProto(viewProto); setProtoForm({titulo:viewProto.titulo,seccion:viewProto.seccion,contenido:viewProto.contenido}); setShowProtoModal(true); setViewProto(null); }}
+                  style={{ display:"flex", alignItems:"center", gap:5, color:"#d97706", border:"1px solid rgba(217,119,6,0.25)", background:"rgba(217,119,6,0.08)", padding:"9px 16px", borderRadius:9, cursor:"pointer", fontWeight:700, fontSize:"13px" }}><Pencil size={13}/> Editar</button>
+              )}
+              <button onClick={()=>setViewProto(null)} style={{ padding:"9px 20px", background:"#005a9c", color:"white", border:"none", borderRadius:9, fontWeight:800, cursor:"pointer", fontSize:"13px" }}>CERRAR</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ══ MODAL: Anexo ═════════════════════════════════════════════════════ */}
       {showAnexoModal && (
         <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.65)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:3000 }}>
@@ -1050,6 +1238,55 @@ export default function InventoryApp() {
           </div>
         </div>
       )}
+
+      {/* ══ MODAL: Cambio de PIN obligatorio ═══════════════════════════════ */}
+      {showPinChange && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.85)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:4000 }}>
+          <div style={{ ...glass, background:"rgba(255,255,255,0.98)", padding:34, width:440 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:6 }}>
+              <Shield size={22} color="#dc2626"/>
+              <h3 style={{ margin:0, color:"#dc2626", fontSize:"18px", fontWeight:800 }}>Cambio de PIN obligatorio</h3>
+            </div>
+            <p style={{ color:"#64748b", fontSize:"13px", margin:"6px 0 22px", lineHeight:1.55 }}>
+              Tu cuenta requiere un PIN nuevo. Elige uno de al menos 4 dígitos. Evita combinaciones obvias.
+            </p>
+            <div style={{ display:"grid", gap:13 }}>
+              <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>PIN ACTUAL</div><input type="password" value={pinActual} onChange={e=>setPinActual(e.target.value)} style={inp}/></div>
+              <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>PIN NUEVO</div><input type="password" value={pinNuevo} onChange={e=>setPinNuevo(e.target.value)} style={inp}/></div>
+              <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>REPETIR PIN NUEVO</div><input type="password" value={pinNuevo2} onChange={e=>setPinNuevo2(e.target.value)} style={inp}/></div>
+              <button onClick={cambiarPin} style={{ padding:13, background:"#005a9c", color:"white", border:"none", borderRadius:11, fontWeight:800, cursor:"pointer", fontSize:"14px", marginTop:6 }}>CAMBIAR PIN</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ CONFIRM DIALOG ════════════════════════════════════════════════════ */}
+      {confirmState.open && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.65)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:5000 }}>
+          <div style={{ ...glass, background:"rgba(255,255,255,0.98)", padding:28, width:420 }}>
+            <h3 style={{ margin:"0 0 10px", color: confirmState.kind === "danger" ? "#dc2626" : "#005a9c", fontSize:"17px", fontWeight:800 }}>
+              {confirmState.title}
+            </h3>
+            <p style={{ margin:"0 0 22px", color:"#334155", fontSize:"14px", lineHeight:1.55 }}>
+              {confirmState.msg}
+            </p>
+            <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+              <button onClick={()=>handleConfirmClose(false)} style={{ padding:"10px 20px", background:"rgba(0,0,0,0.05)", color:"#64748b", border:"none", borderRadius:9, fontWeight:700, cursor:"pointer", fontSize:"13px" }}>CANCELAR</button>
+              <button onClick={()=>handleConfirmClose(true)} style={{ padding:"10px 20px", background: confirmState.kind === "danger" ? "#dc2626" : "#005a9c", color:"white", border:"none", borderRadius:9, fontWeight:800, cursor:"pointer", fontSize:"13px" }}>CONFIRMAR</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ TOASTS ═══════════════════════════════════════════════════════════ */}
+      <div style={{ position:"fixed", top:16, right:16, zIndex:9999, display:"flex", flexDirection:"column", gap:8, pointerEvents:"none" }}>
+        {toasts.map(t => {
+          const bg = t.kind==="success" ? "#10b981" : t.kind==="error" ? "#dc2626" : "#005a9c";
+          return (
+            <div key={t.id} style={{ background:bg, color:"white", padding:"12px 18px", borderRadius:10, fontWeight:700, fontSize:"13px", boxShadow:"0 10px 30px rgba(0,0,0,0.18)", maxWidth:380, pointerEvents:"auto" }}>{t.msg}</div>
+          );
+        })}
+      </div>
     </div>
   );
 }
