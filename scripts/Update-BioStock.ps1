@@ -1,165 +1,158 @@
-#Requires -Version 5.1
-<#
-.SYNOPSIS
-    BIO-STOCK LIMS — Actualización del sistema
-
-.DESCRIPTION
-    Actualiza el sistema a la última versión disponible.
-    Proceso: backup → detener servicios → actualizar código → compilar → reiniciar → verificar.
-    Si algo falla, permite rollback al estado anterior automáticamente.
-
-.PARAMETER SourcePath
-    Ruta del repositorio/código fuente actualizado.
-    Por defecto: directorio padre del script (asume que ya se hizo git pull).
-
-.PARAMETER SkipBackup
-    Omitir backup antes de actualizar (no recomendado).
-
-.PARAMETER AutoRollback
-    Revertir automáticamente si el sistema no responde tras la actualización.
-
-.EXAMPLE
-    .\Update-BioStock.ps1
-    Actualización estándar con backup y verificación.
-
-.EXAMPLE
-    git pull && .\scripts\Update-BioStock.ps1 -AutoRollback
-    Actualización con git pull y rollback automático ante fallos.
-#>
+# Update-BioStock.ps1 — Actualiza BIO-STOCK LIMS desde un ZIP offline.
+# Flujo: detener servicio → backup DB+exe → reemplazar binarios → reiniciar → verificar /health → rollback si falla.
+# Uso: .\Update-BioStock.ps1 -ZipFile "C:\Temp\release-v1.2.0.zip"
+# Requiere: ejecutar como Administrador.
 
 [CmdletBinding()]
 param(
-    [string]$SourcePath   = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-    [switch]$SkipBackup,
-    [switch]$AutoRollback
+  [Parameter(Mandatory=$true)][string]$ZipFile,
+  [string]$InstallPath = "C:\BioStock",
+  [string]$ServiceName = "BioStock-API",
+  [string]$HealthUrl   = "http://localhost:3000/health",
+  [int]   $HealthTimeoutSec = 30,
+  [string]$EventSource = "BioStock-LIMS"
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot 'BioStockConfig.ps1')
-
-Show-Banner 'Actualización del Sistema'
-
-if (-not (Test-Administrator)) {
-    Write-BioLog 'Este script requiere permisos de Administrador.' ERROR
-    exit 1
-}
-
-$startTime = Get-Date
-
-# ── Paso 1: Backup preventivo ─────────────────────────────────────────────────
-if (-not $SkipBackup) {
-    Write-BioLog '[1/6] Creando backup de seguridad...' INFO
-    try {
-        & (Join-Path $PSScriptRoot 'Backup-BioStock.ps1')
-        Write-BioLog 'Backup completado' OK
-    } catch {
-        Write-BioLog "Error en backup: $_" WARN
-        $continue = Read-Host 'El backup falló. ¿Continuar de todos modos? (SI/no)'
-        if ($continue -ne 'SI') { exit 1 }
+function Write-Audit {
+  param([string]$Message, [string]$Level = "Information", [int]$EventId = 3000)
+  Write-Host $Message
+  try {
+    if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
+      New-EventLog -LogName Application -Source $EventSource -ErrorAction SilentlyContinue
     }
-} else {
-    Write-BioLog '[1/6] Backup omitido (--SkipBackup)' WARN
+    Write-EventLog -LogName Application -Source $EventSource -EventId $EventId -EntryType $Level -Message $Message
+  } catch { }
 }
 
-# ── Paso 2: Detener servicios ─────────────────────────────────────────────────
-Write-BioLog '[2/6] Deteniendo servicios...' INFO
-Stop-Service -Name $script:BioStock.ServiceNginx -Force -ErrorAction SilentlyContinue
-Stop-Service -Name $script:BioStock.ServiceApi   -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-Write-BioLog 'Servicios detenidos' OK
+function Test-IsAdmin {
+  $currentUser = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+  return $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
-# Capturar versión actual para posible rollback
-$currentVersion = git -C $SourcePath rev-parse HEAD 2>$null
+if (-not (Test-IsAdmin)) {
+  Write-Host "Este script debe ejecutarse como Administrador (PowerShell elevado)." -ForegroundColor Red
+  exit 1
+}
 
-# ── Paso 3: Actualizar código fuente ─────────────────────────────────────────
-Write-BioLog '[3/6] Actualizando código fuente...' INFO
+if (-not (Test-Path $ZipFile)) {
+  Write-Audit -Message "Archivo de actualizacion no encontrado: $ZipFile" -Level Error -EventId 3001
+  exit 1
+}
+
+if (-not (Test-Path $InstallPath)) {
+  Write-Audit -Message "Ruta de instalacion no existe: $InstallPath" -Level Error -EventId 3001
+  exit 1
+}
+
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$rollbackDir = Join-Path $InstallPath "rollback_$timestamp"
+$tempExtract = Join-Path $env:TEMP "biostock_update_$timestamp"
+
+Write-Host ""
+Write-Host "==================================================================="
+Write-Host "          BIO-STOCK LIMS - Update from ZIP"
+Write-Host "==================================================================="
+Write-Host ""
+Write-Host "ZIP origen:     $ZipFile"
+Write-Host "Instalacion:    $InstallPath"
+Write-Host "Servicio:       $ServiceName"
+Write-Host "Rollback dir:   $rollbackDir"
+Write-Host ""
+
 try {
-    $gitStatus = git -C $SourcePath pull origin main 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        $newVersion = git -C $SourcePath rev-parse HEAD 2>$null
-        Write-BioLog "Código actualizado: $($currentVersion?.Substring(0,8)) → $($newVersion?.Substring(0,8))" OK
-    } else {
-        Write-BioLog "git pull no disponible o falló: $gitStatus" WARN
-        Write-BioLog 'Continuando con código actual en el directorio de instalación' INFO
-    }
-} catch {
-    Write-BioLog "git no disponible. Continuando con código existente." WARN
-}
-
-# ── Paso 4: Instalar dependencias ────────────────────────────────────────────
-Write-BioLog '[4/6] Actualizando dependencias npm...' INFO
-try {
-    Push-Location $script:BioStock.App
-    Copy-Item (Join-Path $SourcePath 'package*.json') -Destination . -Force -ErrorAction SilentlyContinue
-    Copy-Item (Join-Path $SourcePath 'server.cjs')    -Destination . -Force -ErrorAction SilentlyContinue
-    & npm ci --omit=dev --prefer-offline 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "npm ci falló" }
-    Write-BioLog 'Dependencias actualizadas' OK
-} finally {
-    Pop-Location
-}
-
-# ── Paso 5: Recompilar frontend ───────────────────────────────────────────────
-Write-BioLog '[5/6] Compilando interfaz web...' INFO
-try {
-    Push-Location $SourcePath
-    & npm ci 2>&1 | Out-Null
-    & npm run build 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "npm run build falló" }
-    $distPath = Join-Path $SourcePath 'dist'
-    Copy-Item "$distPath\*" -Destination $script:BioStock.NginxHtml -Recurse -Force
-    Write-BioLog 'Frontend compilado y desplegado' OK
-} catch {
-    Write-BioLog "Error compilando frontend: $_" ERROR
-    if ($AutoRollback -and $currentVersion) {
-        Write-BioLog 'Iniciando rollback automático...' WARN
-        git -C $SourcePath checkout $currentVersion 2>$null
-    }
-    # Reiniciar servicios aunque haya error
-    Start-Service -Name $script:BioStock.ServiceApi   -ErrorAction SilentlyContinue
-    Start-Service -Name $script:BioStock.ServiceNginx -ErrorAction SilentlyContinue
-    exit 1
-} finally {
-    Pop-Location
-}
-
-# ── Paso 6: Reiniciar servicios ───────────────────────────────────────────────
-Write-BioLog '[6/6] Reiniciando servicios actualizados...' INFO
-Start-Service -Name $script:BioStock.ServiceApi
-Start-Sleep -Seconds 4
-Start-Service -Name $script:BioStock.ServiceNginx
-Start-Sleep -Seconds 3
-
-# ── Verificar ─────────────────────────────────────────────────────────────────
-Write-BioLog 'Verificando sistema...' INFO
-$attempts = 0
-$healthy = $false
-while ($attempts -lt 8 -and -not $healthy) {
+  # 1. Detener servicio
+  Write-Host "[1/6] Deteniendo servicio $ServiceName..."
+  $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+  if ($svc -and $svc.Status -eq "Running") {
+    Stop-Service -Name $ServiceName -Force
     Start-Sleep -Seconds 2
-    $healthy = Test-ApiHealth
-    $attempts++
-}
+  }
 
-$elapsed = [Math]::Round(((Get-Date) - $startTime).TotalSeconds)
-
-if ($healthy) {
-    Write-BioLog "Actualización completada en $elapsed segundos" OK
-    Write-EventLog -LogName Application -Source $script:BioStock.EventSource `
-        -EventId 3000 -EntryType Information `
-        -Message "BIO-STOCK LIMS actualizado exitosamente en $elapsed segundos" `
-        -ErrorAction SilentlyContinue
-} else {
-    Write-BioLog 'El sistema no responde tras la actualización.' ERROR
-    if ($AutoRollback -and $currentVersion) {
-        Write-BioLog "Ejecutando rollback a $($currentVersion.Substring(0,8))..." WARN
-        git -C $SourcePath checkout $currentVersion 2>$null
-        Write-BioLog 'Ejecuta Update-BioStock.ps1 nuevamente para volver a intentar.' INFO
-    } else {
-        Write-Host "`n  Para rollback manual:" -ForegroundColor Yellow
-        Write-Host "  1. git checkout $($currentVersion?.Substring(0,8))" -ForegroundColor Gray
-        Write-Host '  2. .\Update-BioStock.ps1' -ForegroundColor Gray
+  # 2. Backup actual
+  Write-Host "[2/6] Backup pre-update en $rollbackDir"
+  New-Item -Path $rollbackDir -ItemType Directory -Force | Out-Null
+  $itemsToBackup = @(
+    "BioStock-LIMS.exe",
+    "node_sqlite3.node",
+    "inventario_biorad.db",
+    "master.key",
+    "jwt.secret"
+  )
+  foreach ($item in $itemsToBackup) {
+    $src = Join-Path $InstallPath $item
+    if (Test-Path $src) {
+      Copy-Item -Path $src -Destination $rollbackDir -Force
     }
-    exit 1
+  }
+  Write-Host "      Items respaldados: $((Get-ChildItem $rollbackDir).Count)"
+
+  # 3. Extraer ZIP a temp
+  Write-Host "[3/6] Extrayendo ZIP a $tempExtract..."
+  Expand-Archive -Path $ZipFile -DestinationPath $tempExtract -Force
+
+  # 4. Copiar binarios nuevos (NO sobreescribe master.key, jwt.secret ni la DB)
+  Write-Host "[4/6] Aplicando binarios nuevos..."
+  $protectedFiles = @("master.key", "jwt.secret", "inventario_biorad.db", "inventario_biorad.db-shm", "inventario_biorad.db-wal")
+  Get-ChildItem -Path $tempExtract -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($tempExtract.Length).TrimStart('\','/')
+    if ($protectedFiles -contains $_.Name) {
+      Write-Host "      [SKIP] $rel (protegido - no se sobrescribe)"
+      return
+    }
+    $dest = Join-Path $InstallPath $rel
+    $destDir = Split-Path $dest -Parent
+    if (-not (Test-Path $destDir)) { New-Item -Path $destDir -ItemType Directory -Force | Out-Null }
+    Copy-Item -Path $_.FullName -Destination $dest -Force
+  }
+
+  # 5. Reiniciar servicio
+  Write-Host "[5/6] Iniciando servicio..."
+  Start-Service -Name $ServiceName
+
+  # 6. Healthcheck con timeout
+  Write-Host "[6/6] Verificando /health (timeout ${HealthTimeoutSec}s)..."
+  $deadline = (Get-Date).AddSeconds($HealthTimeoutSec)
+  $healthy = $false
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $r = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 5
+      if ($r.status -eq "ok") { $healthy = $true; break }
+    } catch { }
+    Start-Sleep -Seconds 2
+  }
+
+  if ($healthy) {
+    Write-Host ""
+    Write-Host "UPDATE EXITOSO" -ForegroundColor Green
+    Write-Audit -Message "Update aplicado correctamente desde $ZipFile. Rollback disponible en $rollbackDir" -Level Information -EventId 3000
+    Write-Host ""
+    Write-Host "Rollback queda disponible en: $rollbackDir"
+    Write-Host "Si todo funciona durante 48h, podes borrar esa carpeta."
+    exit 0
+  } else {
+    throw "Healthcheck no respondio OK despues de $HealthTimeoutSec segundos."
+  }
+} catch {
+  Write-Host ""
+  Write-Host "UPDATE FALLO: $_" -ForegroundColor Red
+  Write-Host "Iniciando ROLLBACK automatico..." -ForegroundColor Yellow
+
+  Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+
+  if (Test-Path $rollbackDir) {
+    Get-ChildItem -Path $rollbackDir -File | ForEach-Object {
+      $dest = Join-Path $InstallPath $_.Name
+      Copy-Item -Path $_.FullName -Destination $dest -Force
+      Write-Host "      Restaurado: $($_.Name)"
+    }
+  }
+
+  Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+  Write-Audit -Message "Update FALLO desde $ZipFile. Rollback automatico ejecutado. Error: $_" -Level Error -EventId 3002
+  exit 2
+} finally {
+  Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
 }

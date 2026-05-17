@@ -176,6 +176,36 @@ require("./server.cjs");
   // ── 9. Copiar archivos de acompañamiento ────────────────────────────────────
   fs.copyFileSync(winNode, path.join(RELEASE, "node_sqlite3.node"));
 
+  // ── 9b. Descargar sqlite3.exe (CLI Windows) para Verify-Backup.ps1 ─────────
+  const sqliteCliPath = path.join(RELEASE, "sqlite3.exe");
+  if (!fs.existsSync(sqliteCliPath)) {
+    console.log("📥 Descargando sqlite3.exe (Windows CLI)...");
+    const SQLITE_CLI_URL = "https://www.sqlite.org/2024/sqlite-tools-win-x64-3460100.zip";
+    const sqlZip = path.join(TMP, "sqlite-tools.zip");
+    try {
+      await download(SQLITE_CLI_URL, sqlZip);
+      execSync(`unzip -j -o "${sqlZip}" "sqlite3.exe" -d "${RELEASE}"`, { stdio: "pipe" });
+      if (fs.existsSync(sqliteCliPath)) console.log("✅ sqlite3.exe extraído");
+    } catch (e) {
+      console.log("⚠ No se pudo descargar sqlite3.exe — Verify-Backup.ps1 requerirá descargarlo manualmente.");
+    }
+  }
+
+  // ── 9c. Copiar scripts PowerShell al release ────────────────────────────────
+  const scriptsRel = path.join(RELEASE, "scripts");
+  fs.mkdirSync(scriptsRel, { recursive: true });
+  const psScripts = [
+    "Install-BioStock.ps1", "Update-BioStock.ps1", "Backup-BioStock.ps1",
+    "Verify-Backup.ps1", "Restore-BioStock.ps1", "Start-BioStock.ps1",
+    "Stop-BioStock.ps1", "Get-BioStockStatus.ps1", "Set-ExecutionPolicy-BioStock.ps1",
+    "BioStockConfig.ps1"
+  ];
+  for (const f of psScripts) {
+    const src = path.join(ROOT, "scripts", f);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(scriptsRel, f));
+  }
+  console.log(`✅ ${psScripts.filter(f => fs.existsSync(path.join(scriptsRel, f))).length} scripts PowerShell incluidos`);
+
   // .bat lanzador (doble clic en Windows)
   fs.writeFileSync(path.join(RELEASE, "Iniciar.bat"),
 `@echo off
