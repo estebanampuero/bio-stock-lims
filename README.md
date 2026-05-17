@@ -1,7 +1,40 @@
-# Tauri + React + Typescript
+# BIO-STOCK LIMS
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Sistema de gestión de inventario clínico para laboratorios hospitalarios.
+**On-premise, Windows, sin dependencias cloud.**
 
-## Recommended IDE Setup
+## Para personal de IT del hospital
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+1. Descomprimir `release.zip` en `C:\BioStock\`
+2. Doble clic en `Iniciar.bat` (o ejecutar `BioStock-LIMS.exe`)
+3. Abrir navegador en `http://localhost:3000`
+4. Login inicial: usuario `admin`, PIN `1234` — **se forzará cambio inmediato**
+5. Otros PCs de la red: `http://<IP-del-servidor>:3000`
+
+Documentación operacional completa: ver `release/COMO-INSTALAR.txt`.
+
+## Para desarrolladores
+
+Stack: React 19 + TypeScript + Vite + Express 5 + SQLite (WAL) + JWT + bcrypt + AES-256-GCM.
+
+```bash
+npm install
+npm run dev          # Vite dev server (puerto 1420)
+node server.cjs      # API + servir SPA build (puerto 3000)
+npm run build        # Compilar SPA → dist/
+npm run build:exe    # Empaquetar como Windows .exe → release/
+```
+
+Arquitectura, decisiones, deuda técnica y roadmap: ver [`CLAUDE.md`](CLAUDE.md).
+
+## Seguridad
+
+- JWT con TTL 8 horas (`jwt.secret` autogenerado al primer arranque)
+- PINs hasheados con bcrypt (cost 10)
+- Rate limit en `/api/login`: 10 intentos / 15 min / IP
+- Cifrado AES-256-GCM at-rest de PII (`diuresis.rut_paciente`, `diuresis.nombre_paciente`)
+- RBAC server-side por ruta (ADMIN, TECNOLOGO, TECNICO, TOMA_MUESTRA)
+- Audit log inmutable + `pii_access_log` separado
+- Forzar cambio de PIN al primer login
+
+**No commitear:** `master.key`, `jwt.secret`, `.env`, `*.db`. Están en `.gitignore`.

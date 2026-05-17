@@ -1,5 +1,6 @@
 node_modules/
 dist/
+release/
 .env
 .DS_Store
 
@@ -8,7 +9,15 @@ data/
 backups/
 logs/
 
-# SQLite — la DB vive en ./data/ en producción
+# SQLite — la DB vive junto al .exe en producción
 *.db
 *.db-wal
 *.db-shm
+
+# Secretos generados en runtime — NUNCA en git
+master.key
+jwt.secret
+
+# Build artifacts del .exe
+.tmp-exe-build/
+server-launcher.cjs
