@@ -17,6 +17,10 @@ logs/
 # Secretos generados en runtime — NUNCA en git
 master.key
 jwt.secret
+secrets/
+INITIAL_PIN.txt
+cert.pem
+key.pem
 
 # Build artifacts del .exe
 .tmp-exe-build/
