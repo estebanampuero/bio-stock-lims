@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense, type ReactNode } from "react";
 import {
   LayoutDashboard, Users, Package, FlaskConical, Layers, FileText,
-  Phone, Droplets, ClipboardList, Shield, Moon, Sun, ArrowLeft,
+  Phone, Droplets, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2,
 } from "lucide-react";
 import { useTheme } from "./hooks/useTheme";
 import { Breadcrumbs } from "./components/Breadcrumbs";
@@ -21,10 +21,11 @@ const AnexosView      = lazy(() => import("./views/AnexosView").then(m => ({ def
 const DiuresisView    = lazy(() => import("./views/DiuresisView").then(m => ({ default: m.DiuresisView })));
 const LogsView        = lazy(() => import("./views/LogsView").then(m => ({ default: m.LogsView })));
 const SecurityView    = lazy(() => import("./views/SecurityView").then(m => ({ default: m.SecurityView })));
+const PapeleraView    = lazy(() => import("./views/PapeleraView").then(m => ({ default: m.PapeleraView })));
 
 type Section =
   | "dashboard" | "usuarios" | "inventario" | "maestro" | "secciones"
-  | "protocolos" | "anexos" | "diuresis" | "logs" | "security";
+  | "protocolos" | "anexos" | "diuresis" | "logs" | "security" | "papelera";
 
 interface NavItem {
   id: Section;
@@ -47,6 +48,7 @@ const NAV: NavItem[] = [
   { id: "usuarios",   label: "Usuarios",   icon: <Users size={15}/>,           group: "data",       description: "Personal del laboratorio" },
   { id: "logs",       label: "Auditoría",  icon: <ClipboardList size={15}/>,   group: "data",       description: "Registro completo de eventos" },
   { id: "security",   label: "Seguridad",  icon: <Shield size={15}/>,          group: "security",   description: "Eventos de seguridad" },
+  { id: "papelera",   label: "Papelera",   icon: <Trash2 size={15}/>,          group: "security",   description: "Soft-deleted · restaurar o eliminar permanentemente" },
 ];
 
 const GROUP_LABELS: Record<string, string> = {
@@ -102,6 +104,7 @@ export function ControlCenter({ currentUser, onExit, onToast }: {
           {section === "diuresis"   && <DiuresisView tokens={tokens} onAction={(m, k) => onToast(m, k)} />}
           {section === "logs"       && <LogsView tokens={tokens} />}
           {section === "security"   && <SecurityView tokens={tokens} />}
+          {section === "papelera"   && <PapeleraView tokens={tokens} onAction={onToast} />}
         </Suspense>
       </main>
     </div>

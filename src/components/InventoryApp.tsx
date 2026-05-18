@@ -17,9 +17,20 @@ import { lazy, Suspense } from "react";
 const ControlCenter = lazy(() => import("../features/admin/ControlCenter").then(m => ({ default: m.ControlCenter })));
 
 
+const EMPTY_PREP = {
+  almacenamiento_sin_abrir: "" as const,
+  descongelar_min: null,
+  reconstituir: "" as const,
+  tiempo_reconstitucion_min: null,
+  temperatura_post_reconstitucion: "" as const,
+  duracion_dias: null,
+  cantidad_alicuotas: null,
+  volumen_ul: null,
+};
 const EMPTY_FORM: ProductForm = {
   gtin: "", lot: "", exp: "", nombre: "", detalle: "",
   seccion: "", pack: "", temperatura: "Refrigerado", preparacion: "",
+  ...EMPTY_PREP,
 };
 const EMPTY_DIURESIS = {
   num_peticion: "", rut_paciente: "", nombre_paciente: "",
@@ -150,6 +161,37 @@ export default function InventoryApp() {
   // ─ Control Center (ERP Admin Panel)
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
 
+  // ─ Auto-fill por nombre (independiente de GTIN/lote)
+  const [autofilled, setAutofilled] = useState(false);
+  const buscarPorNombre = async (nombre: string) => {
+    const n = nombre.trim();
+    if (!n) return;
+    try {
+      const r = await apiFetch(`/maestro/by-name?nombre=${encodeURIComponent(n)}`);
+      if (!r.ok) return;
+      const m = await r.json();
+      if (!m) return;
+      // "Soft paste": rellena todos los campos pero permite editar
+      setForm(f => ({
+        ...f,
+        nombre: m.nombre,
+        detalle: f.detalle || m.detalle || "",
+        seccion: f.seccion || m.seccion || "",
+        temperatura: m.almacenamiento_sin_abrir || m.temperatura || f.temperatura,
+        preparacion: f.preparacion || m.preparacion || "",
+        almacenamiento_sin_abrir: (m.almacenamiento_sin_abrir || m.temperatura || f.almacenamiento_sin_abrir) as any,
+        descongelar_min: m.descongelar_min !== undefined ? m.descongelar_min : f.descongelar_min,
+        reconstituir: (m.reconstituir || f.reconstituir) as any,
+        tiempo_reconstitucion_min: m.tiempo_reconstitucion_min !== undefined ? m.tiempo_reconstitucion_min : f.tiempo_reconstitucion_min,
+        temperatura_post_reconstitucion: (m.temperatura_post_reconstitucion || f.temperatura_post_reconstitucion) as any,
+        duracion_dias: m.duracion_dias !== undefined ? m.duracion_dias : f.duracion_dias,
+        cantidad_alicuotas: m.cantidad_alicuotas !== undefined ? m.cantidad_alicuotas : f.cantidad_alicuotas,
+        volumen_ul: m.volumen_ul !== undefined ? m.volumen_ul : f.volumen_ul,
+      }));
+      setAutofilled(true);
+    } catch (_) {}
+  };
+
   // ─ Bulk import desde Excel
   const [bulkPreview, setBulkPreview] = useState<Record<string, any>[]>([]);
   const [bulkErrors, setBulkErrors]   = useState<string[]>([]);
@@ -269,8 +311,26 @@ export default function InventoryApp() {
     const gtin = parsed?.gtin || code.replace(/\D/g,"").slice(-14) || code;
     const res = await apiFetch(`/producto/${gtin}`);
     const existe = await res.json();
-    if (existe) { setForm(f => ({ ...f, gtin, lot:parsed?.lot||f.lot, exp:parsed?.expiration||f.exp, nombre:existe.nombre, detalle:existe.detalle||"", seccion:existe.seccion, temperatura:existe.temperatura||"Refrigerado", preparacion:existe.preparacion||"" })); setProductoExiste(true); }
-    else { setForm(f => ({ ...f, gtin, lot:parsed?.lot||f.lot, exp:parsed?.expiration||f.exp })); setProductoExiste(false); }
+    if (existe) {
+      setForm(f => ({
+        ...f, gtin, lot: parsed?.lot || f.lot, exp: parsed?.expiration || f.exp,
+        nombre: existe.nombre, detalle: existe.detalle || "", seccion: existe.seccion,
+        temperatura: existe.almacenamiento_sin_abrir || existe.temperatura || "Refrigerado",
+        preparacion: existe.preparacion || "",
+        almacenamiento_sin_abrir: existe.almacenamiento_sin_abrir || existe.temperatura || "",
+        descongelar_min: existe.descongelar_min ?? null,
+        reconstituir: existe.reconstituir || "",
+        tiempo_reconstitucion_min: existe.tiempo_reconstitucion_min ?? null,
+        temperatura_post_reconstitucion: existe.temperatura_post_reconstitucion || "",
+        duracion_dias: existe.duracion_dias ?? null,
+        cantidad_alicuotas: existe.cantidad_alicuotas ?? null,
+        volumen_ul: existe.volumen_ul ?? null,
+      }));
+      setProductoExiste(true); setAutofilled(true);
+    } else {
+      setForm(f => ({ ...f, gtin, lot: parsed?.lot || f.lot, exp: parsed?.expiration || f.exp }));
+      setProductoExiste(false); setAutofilled(false);
+    }
     setGtinLocked(true); setExpError(null);
   };
 
@@ -282,18 +342,43 @@ export default function InventoryApp() {
   const verificarGTINManual = async (gtin: string) => {
     if (!gtin || gtin.length < 8) { setProductoExiste(false); return; }
     const res = await apiFetch(`/producto/${gtin}`); const existe = await res.json();
-    if (existe) { setForm(f => ({ ...f, nombre:existe.nombre, detalle:existe.detalle||"", seccion:existe.seccion, temperatura:existe.temperatura||"Refrigerado", preparacion:existe.preparacion||"" })); setProductoExiste(true); }
-    else setProductoExiste(false);
+    if (existe) {
+      setForm(f => ({
+        ...f, nombre: existe.nombre, detalle: existe.detalle || "", seccion: existe.seccion,
+        temperatura: existe.almacenamiento_sin_abrir || existe.temperatura || "Refrigerado",
+        preparacion: existe.preparacion || "",
+        almacenamiento_sin_abrir: existe.almacenamiento_sin_abrir || existe.temperatura || "",
+        descongelar_min: existe.descongelar_min ?? null,
+        reconstituir: existe.reconstituir || "",
+        tiempo_reconstitucion_min: existe.tiempo_reconstitucion_min ?? null,
+        temperatura_post_reconstitucion: existe.temperatura_post_reconstitucion || "",
+        duracion_dias: existe.duracion_dias ?? null,
+        cantidad_alicuotas: existe.cantidad_alicuotas ?? null,
+        volumen_ul: existe.volumen_ul ?? null,
+      }));
+      setProductoExiste(true); setAutofilled(true);
+    } else { setProductoExiste(false); setAutofilled(false); }
   };
 
-  const cerrarModal = () => { setShowModal(false); setGtinLocked(false); setExpError(null); setProductoExiste(false); };
+  const cerrarModal = () => { setShowModal(false); setGtinLocked(false); setExpError(null); setProductoExiste(false); setAutofilled(false); };
 
   const guardarProducto = async () => {
     const err = validarFechaGS1(form.exp); setExpError(err); if (err) return;
     if (!form.gtin || !form.lot) { toast("GTIN y Lote son obligatorios.", "error"); return; }
     if (!productoExiste && (!form.nombre || !form.seccion)) { toast("Nombre y Sección son obligatorios para clasificar.", "error"); return; }
     if (!productoExiste || isAdmin) {
-      await apiFetch(`/producto`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:form.gtin, nombre:form.nombre, detalle:form.detalle, pack:form.pack, seccion:form.seccion, temperatura:form.temperatura, preparacion:form.preparacion, usuario:currentUser!.nombre }) });
+      await apiFetch(`/producto`, { method:"POST", body: JSON.stringify({
+        gtin: form.gtin, nombre: form.nombre, detalle: form.detalle, pack: form.pack, seccion: form.seccion,
+        temperatura: form.almacenamiento_sin_abrir || form.temperatura, preparacion: form.preparacion,
+        almacenamiento_sin_abrir: form.almacenamiento_sin_abrir,
+        descongelar_min: form.descongelar_min,
+        reconstituir: form.reconstituir || "No",
+        tiempo_reconstitucion_min: form.tiempo_reconstitucion_min,
+        temperatura_post_reconstitucion: form.temperatura_post_reconstitucion || null,
+        duracion_dias: form.duracion_dias,
+        cantidad_alicuotas: form.cantidad_alicuotas,
+        volumen_ul: form.volumen_ul,
+      })});
     }
     await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
     cerrarModal();
@@ -302,14 +387,38 @@ export default function InventoryApp() {
 
   const abrirEdicion = (g: GroupedItem) => {
     setEditTarget(g); setEditExpError(null);
-    setEditForm({ gtin:g.gtin, lot:g.lot, exp:g.expiration, nombre:g.nombre, detalle:g.detalle, seccion:g.seccion, pack:"", temperatura:g.temperatura||"Refrigerado", preparacion:g.preparacion||"", newLot:g.lot, newExp:g.expiration });
+    setEditForm({
+      gtin: g.gtin, lot: g.lot, exp: g.expiration,
+      nombre: g.nombre, detalle: g.detalle, seccion: g.seccion, pack: "",
+      temperatura: g.temperatura || "Refrigerado", preparacion: g.preparacion || "",
+      almacenamiento_sin_abrir: (g.almacenamiento_sin_abrir || g.temperatura || "") as any,
+      descongelar_min: g.descongelar_min ?? null,
+      reconstituir: (g.reconstituir || "") as any,
+      tiempo_reconstitucion_min: g.tiempo_reconstitucion_min ?? null,
+      temperatura_post_reconstitucion: (g.temperatura_post_reconstitucion || "") as any,
+      duracion_dias: g.duracion_dias ?? null,
+      cantidad_alicuotas: g.cantidad_alicuotas ?? null,
+      volumen_ul: g.volumen_ul ?? null,
+      newLot: g.lot, newExp: g.expiration,
+    });
     setShowEditModal(true);
   };
 
   const guardarEdicion = async () => {
     if (!editTarget) return;
     const err = validarFechaGS1(editForm.newExp); setEditExpError(err); if (err) return;
-    await apiFetch(`/producto/${editTarget.gtin}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ nombre:editForm.nombre, detalle:editForm.detalle, pack:editForm.pack, seccion:editForm.seccion, temperatura:editForm.temperatura, preparacion:editForm.preparacion, usuario:currentUser!.nombre }) });
+    await apiFetch(`/producto/${editTarget.gtin}`, { method:"PUT", body: JSON.stringify({
+      nombre: editForm.nombre, detalle: editForm.detalle, pack: editForm.pack, seccion: editForm.seccion,
+      temperatura: editForm.almacenamiento_sin_abrir || editForm.temperatura, preparacion: editForm.preparacion,
+      almacenamiento_sin_abrir: editForm.almacenamiento_sin_abrir,
+      descongelar_min: editForm.descongelar_min,
+      reconstituir: editForm.reconstituir || "No",
+      tiempo_reconstitucion_min: editForm.tiempo_reconstitucion_min,
+      temperatura_post_reconstitucion: editForm.temperatura_post_reconstitucion || null,
+      duracion_dias: editForm.duracion_dias,
+      cantidad_alicuotas: editForm.cantidad_alicuotas,
+      volumen_ul: editForm.volumen_ul,
+    })});
     if (editForm.newLot !== editTarget.lot || editForm.newExp !== editTarget.expiration) {
       await apiFetch(`/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser!.nombre }) });
     }
@@ -593,7 +702,22 @@ export default function InventoryApp() {
   const groupMap: Record<string, GroupedItem> = {};
   for (const item of filteredInv) {
     const key = `${item.gtin}||${item.lot}`;
-    if (!groupMap[key]) groupMap[key] = { gtin:item.gtin, lot:item.lot, nombre:item.nombre||"Sin clasificar", detalle:item.detalle||"", seccion:item.seccion||"", expiration:item.expiration, temperatura:item.temperatura||"Refrigerado", preparacion:item.preparacion||"", cantidad:0, itemIds:[] };
+    if (!groupMap[key]) groupMap[key] = {
+      gtin: item.gtin, lot: item.lot, nombre: item.nombre || "Sin clasificar",
+      detalle: item.detalle || "", seccion: item.seccion || "",
+      expiration: item.expiration,
+      temperatura: item.temperatura || "Refrigerado",
+      preparacion: item.preparacion || "",
+      almacenamiento_sin_abrir: item.almacenamiento_sin_abrir as any,
+      descongelar_min: item.descongelar_min ?? null,
+      reconstituir: item.reconstituir as any,
+      tiempo_reconstitucion_min: item.tiempo_reconstitucion_min ?? null,
+      temperatura_post_reconstitucion: item.temperatura_post_reconstitucion as any,
+      duracion_dias: item.duracion_dias ?? null,
+      cantidad_alicuotas: item.cantidad_alicuotas ?? null,
+      volumen_ul: item.volumen_ul ?? null,
+      cantidad: 0, itemIds: [],
+    };
     groupMap[key].cantidad++; groupMap[key].itemIds.push(item.id);
   }
   const groupedList = Object.values(groupMap);
@@ -1182,33 +1306,129 @@ export default function InventoryApp() {
                 : <>
                     <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>SECCIÓN *</div><input list="sec-list" value={form.seccion} onChange={e=>setForm(f=>({...f,seccion:e.target.value}))} style={inp}/><datalist id="sec-list">{secciones.map(s=><option key={s.nombre} value={s.nombre}/>)}</datalist></div>
                     <div>
-                      <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE DEL CONTROL *</div>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+                        <span style={{ fontSize:"10px", fontWeight:700, color:"#64748b" }}>NOMBRE DEL CONTROL *</span>
+                        {autofilled && <span style={{ fontSize:"10px", fontWeight:700, color:"#059669" }}>✓ datos heredados (editables)</span>}
+                      </div>
                       <input
                         list="prod-name-list"
                         value={form.nombre}
-                        onChange={e=>{
-                          const val = e.target.value;
-                          setForm(f=>({ ...f, nombre: val }));
-                          // Si el nombre coincide con un control existente, auto-rellena los campos heredables
-                          const match = inventory.find(i => i.nombre === val && i.nombre);
-                          if (match) {
-                            setForm(f=>({
-                              ...f,
-                              nombre: val,
-                              detalle:     f.detalle     || match.detalle     || "",
-                              seccion:     f.seccion     || match.seccion     || "",
-                              temperatura: match.temperatura || f.temperatura,
-                              preparacion: f.preparacion || match.preparacion || "",
-                            }));
-                          }
-                        }}
+                        onChange={e=>{ setForm(f=>({ ...f, nombre: e.target.value })); setAutofilled(false); }}
+                        onBlur={e => buscarPorNombre(e.target.value)}
                         style={inp}
                       />
                       <datalist id="prod-name-list">{productNames.map(n => <option key={n} value={n}/>)}</datalist>
                     </div>
                     <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={form.detalle} onChange={e=>setForm(f=>({...f,detalle:e.target.value}))} placeholder="[cantidad] x [ml]" style={inp}/></div>
-                    <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>TEMPERATURA</div><select value={form.temperatura} onChange={e=>setForm(f=>({...f,temperatura:e.target.value}))} style={inp}><option>Refrigerado</option><option>Congelado</option><option>Ambiente</option></select></div>
-                    <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>INSTRUCCIONES DE PREPARACIÓN</div><textarea value={form.preparacion} onChange={e=>setForm(f=>({...f,preparacion:e.target.value}))} rows={3} style={{ ...inp, resize:"vertical", lineHeight:1.5 }}/></div>
+
+                    {/* ─── PREPARACIÓN ESTRUCTURADA (8 campos) ─── */}
+                    <div style={{ background:"rgba(0,90,156,0.04)", border:"1px solid rgba(0,90,156,0.12)", borderRadius:10, padding:14, marginTop:4 }}>
+                      <div style={{ fontSize:"11px", fontWeight:800, color:"#005a9c", marginBottom:10, letterSpacing:"0.5px" }}>PREPARACIÓN Y CONSERVACIÓN</div>
+
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                        {/* Almacenamiento sin abrir */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>ALMACENAMIENTO SIN ABRIR *</div>
+                          <select value={form.almacenamiento_sin_abrir} onChange={e=>setForm(f=>({...f, almacenamiento_sin_abrir:e.target.value as any, temperatura:e.target.value }))} style={inp}>
+                            <option value="">— Seleccionar —</option>
+                            <option value="Refrigerado">Refrigerado</option>
+                            <option value="Congelado">Congelado</option>
+                            <option value="Ambiente">T. Ambiente</option>
+                          </select>
+                        </div>
+
+                        {/* Descongelar */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DESCONGELAR (min)</div>
+                          <div style={{ display:"flex", gap:6 }}>
+                            <select
+                              value={form.descongelar_min === null ? "na" : "min"}
+                              onChange={e=>setForm(f=>({ ...f, descongelar_min: e.target.value === "na" ? null : (f.descongelar_min ?? 30) }))}
+                              style={{ ...inp, width:90 }}
+                            >
+                              <option value="na">No aplica</option>
+                              <option value="min">Minutos</option>
+                            </select>
+                            {form.descongelar_min !== null && (
+                              <input type="number" min="0" value={form.descongelar_min} onChange={e=>setForm(f=>({ ...f, descongelar_min: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 }))} style={{ ...inp, flex:1 }}/>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Reconstituir */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>RECONSTITUIR</div>
+                          <select value={form.reconstituir} onChange={e=>setForm(f=>({ ...f, reconstituir: e.target.value as any, ...(e.target.value === "No" ? { tiempo_reconstitucion_min: null, temperatura_post_reconstitucion: "", duracion_dias: null, cantidad_alicuotas: null, volumen_ul: null } : {}) }))} style={inp}>
+                            <option value="">— Seleccionar —</option>
+                            <option value="No">No</option>
+                            <option value="Si">Sí</option>
+                          </select>
+                        </div>
+
+                        {/* Tiempo reconstitución */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>TIEMPO RECONSTITUCIÓN (min)</div>
+                          <div style={{ display:"flex", gap:6 }}>
+                            <select
+                              disabled={form.reconstituir !== "Si"}
+                              value={form.tiempo_reconstitucion_min === null ? "na" : "min"}
+                              onChange={e=>setForm(f=>({ ...f, tiempo_reconstitucion_min: e.target.value === "na" ? null : (f.tiempo_reconstitucion_min ?? 30) }))}
+                              style={{ ...inp, width:90, opacity: form.reconstituir !== "Si" ? 0.5 : 1 }}
+                            >
+                              <option value="na">No aplica</option>
+                              <option value="min">Minutos</option>
+                            </select>
+                            {form.tiempo_reconstitucion_min !== null && form.reconstituir === "Si" && (
+                              <input type="number" min="0" value={form.tiempo_reconstitucion_min} onChange={e=>setForm(f=>({ ...f, tiempo_reconstitucion_min: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 }))} style={{ ...inp, flex:1 }}/>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Temperatura post-reconstitución */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>T° ALMACÉN POST-RECONST.</div>
+                          <select disabled={form.reconstituir !== "Si"} value={form.temperatura_post_reconstitucion} onChange={e=>setForm(f=>({ ...f, temperatura_post_reconstitucion: e.target.value as any }))} style={{ ...inp, opacity: form.reconstituir !== "Si" ? 0.5 : 1 }}>
+                            <option value="">— Seleccionar —</option>
+                            <option value="Refrigerado">Refrigerado</option>
+                            <option value="Congelado">Congelado</option>
+                            <option value="Ambiente">T. Ambiente</option>
+                          </select>
+                        </div>
+
+                        {/* Duración */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DURACIÓN (días)</div>
+                          <input type="number" min="0" placeholder="—" disabled={form.reconstituir !== "Si"}
+                            value={form.duracion_dias ?? ""}
+                            onChange={e=>setForm(f=>({ ...f, duracion_dias: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 }))}
+                            style={{ ...inp, opacity: form.reconstituir !== "Si" ? 0.5 : 1 }}/>
+                        </div>
+
+                        {/* Cantidad alícuotas */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>CANTIDAD ALÍCUOTAS</div>
+                          <input type="number" min="0" placeholder="—" disabled={form.reconstituir !== "Si"}
+                            value={form.cantidad_alicuotas ?? ""}
+                            onChange={e=>setForm(f=>({ ...f, cantidad_alicuotas: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 }))}
+                            style={{ ...inp, opacity: form.reconstituir !== "Si" ? 0.5 : 1 }}/>
+                        </div>
+
+                        {/* Volumen uL */}
+                        <div>
+                          <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>VOLUMEN ALÍCUOTA (μL)</div>
+                          <input type="number" min="0" placeholder="—" disabled={form.reconstituir !== "Si"}
+                            value={form.volumen_ul ?? ""}
+                            onChange={e=>setForm(f=>({ ...f, volumen_ul: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 }))}
+                            style={{ ...inp, opacity: form.reconstituir !== "Si" ? 0.5 : 1 }}/>
+                        </div>
+                      </div>
+
+                      {/* Notas libres opcionales */}
+                      <div style={{ marginTop:10 }}>
+                        <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOTAS ADICIONALES (opcional)</div>
+                        <textarea value={form.preparacion} onChange={e=>setForm(f=>({...f,preparacion:e.target.value}))} rows={2} placeholder="Observaciones libres sobre la preparación" style={{ ...inp, resize:"vertical", lineHeight:1.5 }}/>
+                      </div>
+                    </div>
                   </>
               }
               <button onClick={guardarProducto} style={{ padding:13, background:"#005a9c", color:"white", border:"none", borderRadius:11, fontWeight:800, cursor:"pointer", boxShadow:"0 6px 18px rgba(0,90,156,0.3)", fontSize:"14px" }}>{productoExiste?"AÑADIR AL STOCK":"GUARDAR Y AÑADIR AL STOCK"}</button>
@@ -1267,10 +1487,32 @@ export default function InventoryApp() {
                 <div style={{ flex:1, background:"rgba(0,90,156,0.04)", padding:11, borderRadius:9 }}><div style={{ fontSize:"10px", fontWeight:800, color:"#64748b", marginBottom:3 }}>ALMACENAMIENTO</div><TempBadge temp={prepItem.temperatura}/></div>
               </div>
               {prepItem.detalle&&<div><div style={{ fontSize:"10px", fontWeight:800, color:"#64748b", marginBottom:3 }}>PRESENTACIÓN</div><div style={{ fontWeight:600, color:"#334155" }}>{prepItem.detalle}</div></div>}
-              <div>
-                <div style={{ fontSize:"10px", fontWeight:800, color:"#64748b", marginBottom:6 }}>INSTRUCCIONES</div>
-                {prepItem.preparacion?<div style={{ background:"rgba(3,105,161,0.04)", border:"1px solid rgba(3,105,161,0.14)", borderRadius:10, padding:13, color:"#1e293b", fontSize:"14px", lineHeight:1.7, whiteSpace:"pre-wrap" }}>{prepItem.preparacion}</div>:<div style={{ background:"rgba(0,0,0,0.03)", borderRadius:10, padding:13, color:"#94a3b8", fontSize:"13px", fontStyle:"italic" }}>Sin instrucciones. El Admin puede agregarlas editando el control.</div>}
-              </div>
+
+              {/* Preparación estructurada */}
+              {(prepItem.almacenamiento_sin_abrir || prepItem.reconstituir || prepItem.descongelar_min !== null) ? (
+                <div style={{ background:"rgba(3,105,161,0.04)", border:"1px solid rgba(3,105,161,0.14)", borderRadius:10, padding:13 }}>
+                  <div style={{ fontSize:"10px", fontWeight:800, color:"#0369a1", marginBottom:8, letterSpacing:"0.5px" }}>PREPARACIÓN</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:"13px" }}>
+                    {prepItem.almacenamiento_sin_abrir && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>Sin abrir</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.almacenamiento_sin_abrir}</div></div>}
+                    {prepItem.descongelar_min !== null && prepItem.descongelar_min !== undefined && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>Descongelar</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.descongelar_min} min</div></div>}
+                    {prepItem.reconstituir && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>Reconstituir</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.reconstituir}</div></div>}
+                    {prepItem.tiempo_reconstitucion_min !== null && prepItem.tiempo_reconstitucion_min !== undefined && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>Tiempo reconst.</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.tiempo_reconstitucion_min} min</div></div>}
+                    {prepItem.temperatura_post_reconstitucion && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>T° post-reconst.</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.temperatura_post_reconstitucion}</div></div>}
+                    {prepItem.duracion_dias !== null && prepItem.duracion_dias !== undefined && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>Duración</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.duracion_dias} días</div></div>}
+                    {prepItem.cantidad_alicuotas !== null && prepItem.cantidad_alicuotas !== undefined && <div><div style={{ color:"#64748b", fontSize:"10px", fontWeight:700 }}>Alícuotas</div><div style={{ color:"#1e293b", fontWeight:600 }}>{prepItem.cantidad_alicuotas} × {prepItem.volumen_ul || "?"} μL</div></div>}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Notas libres */}
+              {prepItem.preparacion ? (
+                <div>
+                  <div style={{ fontSize:"10px", fontWeight:800, color:"#64748b", marginBottom:6 }}>NOTAS ADICIONALES</div>
+                  <div style={{ background:"rgba(0,0,0,0.02)", border:"1px solid rgba(0,0,0,0.05)", borderRadius:10, padding:13, color:"#334155", fontSize:"13px", lineHeight:1.6, whiteSpace:"pre-wrap" }}>{prepItem.preparacion}</div>
+                </div>
+              ) : (!prepItem.almacenamiento_sin_abrir && !prepItem.reconstituir) ? (
+                <div style={{ background:"rgba(0,0,0,0.03)", borderRadius:10, padding:13, color:"#94a3b8", fontSize:"13px", fontStyle:"italic" }}>Sin instrucciones. El Admin puede agregarlas editando el control.</div>
+              ) : null}
             </div>
             <button onClick={()=>setShowPrepModal(false)} style={{ width:"100%", marginTop:18, padding:12, background:"rgba(0,0,0,0.05)", border:"none", borderRadius:10, fontWeight:700, color:"#64748b", cursor:"pointer" }}>CERRAR</button>
           </div>

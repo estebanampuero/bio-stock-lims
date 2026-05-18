@@ -7,12 +7,12 @@ export interface User {
   must_change_pin?: boolean;
 }
 
-export interface InvRow {
+export interface InvRow extends Partial<PrepFields> {
   id: string; gtin: string; lot: string; expiration: string; usuario: string;
   nombre?: string; detalle?: string; seccion?: string; temperatura?: string; preparacion?: string;
 }
 
-export interface GroupedItem {
+export interface GroupedItem extends Partial<PrepFields> {
   gtin: string; lot: string; nombre: string; detalle: string; seccion: string;
   expiration: string; temperatura: string; preparacion: string;
   cantidad: number; itemIds: string[];
@@ -35,9 +35,29 @@ export interface DiuresisRow {
   archivado: number;
 }
 
-export interface ProductForm {
+export type TempStorage = "Refrigerado" | "Congelado" | "Ambiente";
+export type YesNo = "Si" | "No";
+
+export interface PrepFields {
+  almacenamiento_sin_abrir: TempStorage | "";
+  descongelar_min: number | null;            // null = no aplica
+  reconstituir: YesNo | "";
+  tiempo_reconstitucion_min: number | null;  // null = no aplica
+  temperatura_post_reconstitucion: TempStorage | "";
+  duracion_dias: number | null;
+  cantidad_alicuotas: number | null;
+  volumen_ul: number | null;
+}
+
+export interface ProductForm extends PrepFields {
   gtin: string; lot: string; exp: string; nombre: string; detalle: string;
   seccion: string; pack: string; temperatura: string; preparacion: string;
+}
+
+export interface MaestroRow extends PrepFields {
+  gtin: string; nombre: string; detalle: string; pack: string;
+  seccion: string; temperatura: string; preparacion: string;
+  fecha_baja: string | null;
 }
 
 export interface LogEntry {
