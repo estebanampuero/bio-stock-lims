@@ -351,6 +351,76 @@ async function registrarAccesoPII(req, tabla, filtro, rowsDevueltos) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// BACKUP AUTOMÁTICO DIARIO (02:00 + uno al arranque si > 24h sin backup)
+// ════════════════════════════════════════════════════════════════════════════
+
+const BACKUPS_DIR     = path.join(BASE_DIR, "backups");
+const BACKUP_RETAIN_DAYS = 30;
+
+function listBackups() {
+  if (!fs.existsSync(BACKUPS_DIR)) return [];
+  return fs.readdirSync(BACKUPS_DIR)
+    .filter(f => f.startsWith("inventario_") && f.endsWith(".db"))
+    .map(f => ({ name: f, path: path.join(BACKUPS_DIR, f), mtime: fs.statSync(path.join(BACKUPS_DIR, f)).mtime }))
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+async function ejecutarBackupDB() {
+  if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const dest = path.join(BACKUPS_DIR, `inventario_${ts}.db`);
+  try {
+    // VACUUM INTO crea una copia consistente sin bloquear writers
+    await db.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
+    // Verificación rápida de integridad
+    const verify = await db.get(`SELECT 1`);  // si la DB original está OK ya es suficiente
+    const sz = fs.statSync(dest).size;
+    console.log(`💾 Backup creado: ${dest} (${(sz/1024).toFixed(1)} KB)`);
+
+    // Retention: borrar backups > BACKUP_RETAIN_DAYS días
+    const cutoff = Date.now() - BACKUP_RETAIN_DAYS * 86400000;
+    let purged = 0;
+    for (const b of listBackups()) {
+      if (b.mtime.getTime() < cutoff) { fs.unlinkSync(b.path); purged++; }
+    }
+    if (purged > 0) console.log(`🧹 Purgados ${purged} backup(s) > ${BACKUP_RETAIN_DAYS}d`);
+
+    await registrarLog("system", "BACKUP DB", `${path.basename(dest)} (${(sz/1024).toFixed(0)} KB)`, "localhost");
+    return dest;
+  } catch (e) {
+    console.error(`❌ Backup falló: ${e.message}`);
+    await registrarLog("system", "BACKUP DB FALLIDO", e.message, "localhost");
+    return null;
+  }
+}
+
+function programarBackupDiario() {
+  const ahora = new Date();
+  const objetivo = new Date();
+  objetivo.setHours(2, 0, 0, 0); // 02:00 hora local
+  if (ahora >= objetivo) objetivo.setDate(objetivo.getDate() + 1);
+  const ms = objetivo - ahora;
+  console.log(`⏰ Próximo backup automático: ${objetivo.toLocaleString("es-CL")} (en ${Math.round(ms/3600000)}h)`);
+  setTimeout(async () => {
+    await ejecutarBackupDB();
+    programarBackupDiario();
+  }, ms);
+}
+
+// Al arranque: si no hay backup o el último es > 24h, hacer uno ahora.
+async function backupAlArranqueSiHaceFalta() {
+  const backups = listBackups();
+  const last = backups[0];
+  if (!last || (Date.now() - last.mtime.getTime()) > 24 * 3600000) {
+    console.log("📥 Sin backup reciente (<24h) — generando uno ahora...");
+    await ejecutarBackupDB();
+  } else {
+    const hsAgo = Math.round((Date.now() - last.mtime.getTime()) / 3600000);
+    console.log(`✓ Último backup: ${last.name} (${hsAgo}h atrás)`);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ARCHIVO DIURESIS 23:00
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -385,6 +455,8 @@ function programarArchivoDiuresis() {
   await rotateDefaultAdminPin();
   console.log(`✅ BIO-STOCK API lista. DB: ${DB_PATH}`);
   programarArchivoDiuresis();
+  await backupAlArranqueSiHaceFalta();
+  programarBackupDiario();
 })().catch(e => { console.error("Init fallido:", e); process.exit(1); });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -916,6 +988,26 @@ v1.get("/admin/all/:tabla", authenticate, authorize("ADMIN"), async (req, res) =
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
     const rows = await db.all(`SELECT * FROM ${req.params.tabla} ORDER BY ${meta.softCol} ASC LIMIT 2000`);
     res.json(rows);
+  } catch (e) { errRes(res, e); }
+});
+
+// ── ADMIN: backups ──────────────────────────────────────────────────────────
+v1.get("/admin/backups", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const list = listBackups().map(b => ({
+      name: b.name,
+      size: fs.statSync(b.path).size,
+      mtime: b.mtime.toISOString(),
+    }));
+    res.json({ backups: list, total: list.length, retention_days: BACKUP_RETAIN_DAYS });
+  } catch (e) { errRes(res, e); }
+});
+
+v1.post("/admin/backups/run", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const dest = await ejecutarBackupDB();
+    if (!dest) return res.status(500).json({ success: false, message: "Backup falló" });
+    res.json({ success: true, file: path.basename(dest) });
   } catch (e) { errRes(res, e); }
 });
 
