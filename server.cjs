@@ -738,6 +738,100 @@ v1.delete("/usuarios/:id", authenticate, authorize("ADMIN"), async (req, res) =>
 // Montar el router versionado
 app.use("/api/v1", v1);
 
+// ── ADMIN: métricas agregadas para el Control Center ─────────────────────────
+v1.get("/admin/dashboard", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const todayISO = new Date().toISOString().split("T")[0];
+    const last7Days = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    const last30Days = new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0];
+
+    const totals = await db.get(`
+      SELECT
+        (SELECT COUNT(*) FROM inventario WHERE fecha_baja IS NULL) AS stock_activo,
+        (SELECT COUNT(*) FROM inventario WHERE fecha_baja IS NOT NULL) AS stock_consumido,
+        (SELECT COUNT(*) FROM maestro_productos) AS productos_maestro,
+        (SELECT COUNT(*) FROM usuarios) AS usuarios_total,
+        (SELECT COUNT(*) FROM diuresis) AS diuresis_total,
+        (SELECT COUNT(*) FROM anexos) AS anexos_total,
+        (SELECT COUNT(*) FROM protocolos) AS protocolos_total,
+        (SELECT COUNT(*) FROM secciones) AS secciones_total,
+        (SELECT COUNT(*) FROM logs) AS logs_total,
+        (SELECT COUNT(*) FROM logs WHERE DATE(fecha) = ?) AS logs_hoy,
+        (SELECT COUNT(*) FROM logs WHERE DATE(fecha) >= ?) AS logs_7d,
+        (SELECT COUNT(*) FROM diuresis WHERE DATE(fecha,'localtime') = DATE('now','localtime')) AS diuresis_hoy,
+        (SELECT COUNT(*) FROM diuresis WHERE DATE(fecha,'localtime') >= ?) AS diuresis_7d,
+        (SELECT COUNT(*) FROM logs WHERE accion LIKE 'LOGIN FALLIDO' AND DATE(fecha) >= ?) AS login_fallidos_7d,
+        (SELECT COUNT(*) FROM logs WHERE accion LIKE 'ACCESO DENEGADO' AND DATE(fecha) >= ?) AS denegados_7d,
+        (SELECT COUNT(*) FROM login_lockouts WHERE locked_until IS NOT NULL AND locked_until > datetime('now')) AS cuentas_bloqueadas
+    `, [todayISO, last7Days, last7Days, last7Days, last30Days]);
+
+    // Próximos a vencer (próximos 30 / 90 días). expiration es AAMMDD.
+    const allActive = await db.all(`
+      SELECT i.expiration, i.gtin, m.nombre, m.seccion
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
+      WHERE i.fecha_baja IS NULL AND length(i.expiration) = 6
+    `);
+    const today = new Date(); today.setHours(0,0,0,0);
+    let vencidos = 0, lt30 = 0, lt90 = 0;
+    for (const r of allActive) {
+      const y = 2000 + parseInt(r.expiration.slice(0,2));
+      const m = parseInt(r.expiration.slice(2,4)) - 1;
+      const d = parseInt(r.expiration.slice(4,6));
+      const dias = Math.floor((new Date(y, m, d).getTime() - today.getTime()) / 86400000);
+      if (dias < 0) vencidos++;
+      else if (dias <= 30) lt30++;
+      else if (dias <= 90) lt90++;
+    }
+
+    // Distribución por sección (stock activo)
+    const porSeccion = await db.all(`
+      SELECT COALESCE(m.seccion, 'Sin clasificar') AS seccion, COUNT(*) AS count
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
+      WHERE i.fecha_baja IS NULL
+      GROUP BY m.seccion
+      ORDER BY count DESC
+    `);
+
+    // Distribución por temperatura
+    const porTemperatura = await db.all(`
+      SELECT COALESCE(m.temperatura, 'Sin clasificar') AS temperatura, COUNT(*) AS count
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
+      WHERE i.fecha_baja IS NULL
+      GROUP BY m.temperatura
+    `);
+
+    // Usuarios por rol
+    const porRol = await db.all(`SELECT rol, COUNT(*) AS count FROM usuarios GROUP BY rol`);
+
+    // Actividad últimos 7 días (timeline)
+    const actividad7d = await db.all(`
+      SELECT DATE(fecha) AS dia, COUNT(*) AS count
+      FROM logs WHERE DATE(fecha) >= ?
+      GROUP BY DATE(fecha) ORDER BY dia ASC
+    `, [last7Days]);
+
+    // Top usuarios por actividad
+    const topUsuarios = await db.all(`
+      SELECT usuario, perfil, COUNT(*) AS acciones
+      FROM logs WHERE DATE(fecha) >= ?
+      GROUP BY usuario, perfil ORDER BY acciones DESC LIMIT 5
+    `, [last7Days]);
+
+    // Actividad reciente (10 últimos eventos)
+    const recent = await db.all(`
+      SELECT id, usuario, perfil, accion, detalles, fecha, ip
+      FROM logs ORDER BY fecha DESC LIMIT 10
+    `);
+
+    res.json({
+      totals,
+      vencimientos: { vencidos, proximos_30d: lt30, proximos_90d: lt90 },
+      porSeccion, porTemperatura, porRol,
+      actividad7d, topUsuarios, recent
+    });
+  } catch (e) { errRes(res, e); }
+});
+
 // ── HEALTH (no versionado, fuera de auth) ──────────────────────────────────
 app.get("/health", async (req, res) => {
   try { await db.get("SELECT 1"); res.json({ status: "ok", timestamp: new Date().toISOString(), tls: TLS_ENABLED }); }

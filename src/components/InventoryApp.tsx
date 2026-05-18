@@ -3,7 +3,7 @@ import {
   Shield, LayoutDashboard, Users, Activity, History, LogOut,
   UserPlus, ClipboardList, ScanLine, ChevronDown, ChevronRight,
   FlaskConical, Pencil, Trash2, BookOpen, FileText, FilePlus,
-  Search, X, Phone, Droplets, Archive, Plus, Upload, Printer,
+  Search, X, Phone, Droplets, Archive, Plus, Upload, Printer, LayoutGrid,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { parseGS1 } from "../utils/gs1Parser";
@@ -13,6 +13,8 @@ import { formatExp, validarFechaGS1, getEstado, fmtDT } from "../lib/format";
 import { RolBadge, EstadoBadge, TempBadge } from "./shared/Badges";
 import { SectionHead, FErr } from "./shared/SectionHead";
 import type { InvRow, GroupedItem, Protocolo, Anexo, DiuresisRow, ProductForm, User } from "../types";
+import { lazy, Suspense } from "react";
+const ControlCenter = lazy(() => import("../features/admin/ControlCenter").then(m => ({ default: m.ControlCenter })));
 
 
 const EMPTY_FORM: ProductForm = {
@@ -144,6 +146,9 @@ export default function InventoryApp() {
 
   // ─ Anomaly check de diuresis
   const [anomalyWarning, setAnomalyWarning] = useState<string|null>(null);
+
+  // ─ Control Center (ERP Admin Panel)
+  const [controlCenterOpen, setControlCenterOpen] = useState(false);
 
   // ─ Bulk import desde Excel
   const [bulkPreview, setBulkPreview] = useState<Record<string, any>[]>([]);
@@ -605,6 +610,19 @@ export default function InventoryApp() {
     return a.servicio.toLowerCase().includes(t) || a.salas?.toLowerCase().includes(t) || a.numero.toLowerCase().includes(t);
   });
 
+  // ── CONTROL CENTER (ERP Admin) — overlay full-screen para admins ─────────────
+  if (controlCenterOpen && currentUser && isAdmin) {
+    return (
+      <Suspense fallback={<div style={{ position:"fixed", inset:0, background:"#0a0a0a", color:"#fafafa", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"system-ui" }}>Cargando Control Center…</div>}>
+        <ControlCenter
+          currentUser={currentUser}
+          onExit={() => setControlCenterOpen(false)}
+          onToast={toast}
+        />
+      </Suspense>
+    );
+  }
+
   // ── LOGIN ─────────────────────────────────────────────────────────────────────
   if (showLogin) {
     const li: React.CSSProperties = { width:"100%", padding:"13px", borderRadius:"10px", border:"1px solid rgba(255,255,255,0.2)", background:"rgba(0,0,0,0.2)", color:"white", textAlign:"center", fontSize:"15px", outline:"none", boxSizing:"border-box" };
@@ -650,6 +668,20 @@ export default function InventoryApp() {
           {isAdmin && <button onClick={()=>setView("Importar")} style={navBtn(view==="Importar")}><Upload size={14}/> Importar Excel</button>}
           {isAdmin && <button onClick={()=>setView("Usuarios")} style={navBtn(view==="Usuarios")}><Users size={14}/> Personal</button>}
           {isAdmin && <button onClick={()=>setView("Logs")} style={navBtn(view==="Logs")}><History size={14}/> Auditoría</button>}
+          {isAdmin && (
+            <button onClick={()=>setControlCenterOpen(true)}
+              style={{
+                marginTop: 10, padding: "11px 14px",
+                background: "linear-gradient(135deg, #2563eb, #1d4ed8)",
+                color: "white", border: "none", borderRadius: 10,
+                fontWeight: 800, cursor: "pointer", fontSize: "13px",
+                display: "flex", alignItems: "center", gap: 8,
+                boxShadow: "0 4px 14px rgba(37,99,235,0.35)",
+                letterSpacing: 0.3,
+              }}>
+              <LayoutGrid size={14}/> CONTROL CENTER
+            </button>
+          )}
           {canInventario && (
             <button onClick={()=>{ setForm({...EMPTY_FORM, seccion:activeSection||""}); setGtinLocked(false); setExpError(null); setProductoExiste(false); setShowModal(true); }}
               style={{ padding:"10px", background:"#005a9c", color:"white", border:"none", borderRadius:10, marginTop:6, cursor:"pointer", fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:7, boxShadow:"0 4px 14px rgba(0,90,156,0.3)", fontSize:"13px" }}>
