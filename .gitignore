@@ -25,3 +25,4 @@ key.pem
 # Build artifacts del .exe
 .tmp-exe-build/
 server-launcher.cjs
+.claude/
