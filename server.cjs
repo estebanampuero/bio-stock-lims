@@ -127,30 +127,42 @@ function authorize(...rolesPermitidos) {
   };
 }
 
-// ── Lockout por usuario (in-memory, complemento del rate-limit por IP) ──────
-const failedLogins = new Map(); // nombre → { count, lockedUntil }
+// ── Lockout por usuario (persistente en DB, sobrevive reinicio del servicio)
 const LOCK_AFTER       = 5;
 const LOCK_DURATION_MS = 30 * 60 * 1000;
 
-function registerLoginAttempt(nombre, success) {
-  if (success) {
-    failedLogins.delete(nombre);
-    return { locked: false };
-  }
-  const entry = failedLogins.get(nombre) || { count: 0, lockedUntil: 0 };
-  entry.count++;
-  if (entry.count >= LOCK_AFTER) {
-    entry.lockedUntil = Date.now() + LOCK_DURATION_MS;
-    entry.count = 0;
-  }
-  failedLogins.set(nombre, entry);
-  return { locked: entry.lockedUntil > Date.now() };
+async function registerLoginAttempt(nombre, success) {
+  try {
+    if (success) {
+      await db.run("DELETE FROM login_lockouts WHERE nombre = ?", [nombre]);
+      return { locked: false };
+    }
+    const now = new Date().toISOString();
+    const row = await db.get("SELECT fail_count, locked_until FROM login_lockouts WHERE nombre = ?", [nombre]);
+    let count = (row?.fail_count || 0) + 1;
+    let lockedUntil = null;
+    if (count >= LOCK_AFTER) {
+      lockedUntil = new Date(Date.now() + LOCK_DURATION_MS).toISOString();
+      count = 0;
+    }
+    await db.run(
+      "INSERT INTO login_lockouts (nombre, fail_count, locked_until, last_attempt) VALUES (?, ?, ?, ?) ON CONFLICT(nombre) DO UPDATE SET fail_count = ?, locked_until = ?, last_attempt = ?",
+      [nombre, count, lockedUntil, now, count, lockedUntil, now]
+    );
+    return { locked: !!lockedUntil };
+  } catch (_) { return { locked: false }; }
 }
-function isLocked(nombre) {
-  const entry = failedLogins.get(nombre);
-  if (!entry || !entry.lockedUntil) return false;
-  if (entry.lockedUntil <= Date.now()) { failedLogins.delete(nombre); return false; }
-  return true;
+
+async function isLocked(nombre) {
+  try {
+    const row = await db.get("SELECT locked_until FROM login_lockouts WHERE nombre = ?", [nombre]);
+    if (!row || !row.locked_until) return false;
+    if (new Date(row.locked_until).getTime() <= Date.now()) {
+      await db.run("DELETE FROM login_lockouts WHERE nombre = ?", [nombre]);
+      return false;
+    }
+    return true;
+  } catch (_) { return false; }
 }
 
 // ── PII access log con throttle (max 1 row/min/user/tabla) ──────────────────
@@ -230,6 +242,16 @@ async function runMigrations(db) {
   if (v < 10) {
     await db.exec(`CREATE TABLE IF NOT EXISTS pii_access_log (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario TEXT NOT NULL, perfil TEXT, tabla TEXT NOT NULL, filtro TEXT, rows_devueltos INTEGER, fecha TEXT NOT NULL, ip TEXT)`);
     await db.exec("PRAGMA user_version = 10"); v = 10;
+  }
+  if (v < 11) {
+    // Lockout persistente — sobrevive reinicio del servicio
+    await db.exec(`CREATE TABLE IF NOT EXISTS login_lockouts (
+      nombre TEXT PRIMARY KEY,
+      fail_count INTEGER DEFAULT 0,
+      locked_until TEXT,
+      last_attempt TEXT
+    )`);
+    await db.exec("PRAGMA user_version = 11"); v = 11;
   }
 }
 
@@ -349,14 +371,14 @@ v1.post("/login", loginLimiter, async (req, res) => {
     const ip = getIP(req);
     if (!nombre || !pin) return res.status(400).json({ success: false, message: "Nombre y PIN obligatorios" });
 
-    if (isLocked(nombre)) {
+    if (await isLocked(nombre)) {
       await registrarLog(nombre, "LOGIN BLOQUEADO", `Usuario en lockout temporal`, ip);
       return res.status(429).json({ success: false, message: "Cuenta bloqueada temporalmente. Intente en 30 minutos." });
     }
 
     const user = await db.get("SELECT id, nombre, rol, pin, must_change_pin FROM usuarios WHERE nombre = ?", [nombre]);
     const valid = user && await bcrypt.compare(pin, user.pin);
-    registerLoginAttempt(nombre, !!valid);
+    await registerLoginAttempt(nombre, !!valid);
 
     if (valid) {
       const token = jwt.sign({ sub: user.id, nombre: user.nombre, rol: user.rol }, JWT_SECRET, { expiresIn: JWT_TTL });
@@ -428,6 +450,42 @@ v1.patch("/inventario/:id", authenticate, canInv, async (req, res) => {
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
 });
+// Bulk import: recibe array de productos (maestro_productos), inserta en transacción.
+// Cada fila: { gtin, nombre, detalle?, pack?, seccion, temperatura?, preparacion? }
+v1.post("/inventario/bulk-import", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, message: "items debe ser un array no vacío" });
+    if (items.length > 5000) return res.status(400).json({ success: false, message: "Máximo 5000 filas por import" });
+
+    let inserted = 0, updated = 0, skipped = 0;
+    const errors = [];
+    await db.exec("BEGIN");
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const r = items[i];
+        const gtin = String(r.gtin || "").trim();
+        const nombre = String(r.nombre || "").trim();
+        const seccion = String(r.seccion || "").trim();
+        if (!gtin || !nombre || !seccion) { skipped++; errors.push({ row: i+2, reason: "Faltan campos GTIN, Nombre o Sección" }); continue; }
+        await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
+        const existing = await db.get("SELECT gtin FROM maestro_productos WHERE gtin = ?", [gtin]);
+        await db.run(
+          "INSERT OR REPLACE INTO maestro_productos (gtin, nombre, detalle, pack, seccion, temperatura, preparacion) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [gtin, nombre, r.detalle || "", r.pack || "", seccion, r.temperatura || "Refrigerado", r.preparacion || ""]
+        );
+        if (existing) updated++; else inserted++;
+      }
+      await db.exec("COMMIT");
+    } catch (e) {
+      await db.exec("ROLLBACK");
+      throw e;
+    }
+    await registrarLog(req.user.nombre, "BULK IMPORT", `Insertados: ${inserted}, Actualizados: ${updated}, Saltados: ${skipped}`, getIP(req));
+    res.json({ success: true, inserted, updated, skipped, errors: errors.slice(0, 50) });
+  } catch (e) { errRes(res, e, "Error en bulk import"); }
+});
+
 v1.put("/inventario/lote", authenticate, canInv, async (req, res) => {
   try {
     const { gtin, lotActual, nuevoLot, nuevaExp } = req.body;

@@ -3,100 +3,17 @@ import {
   Shield, LayoutDashboard, Users, Activity, History, LogOut,
   UserPlus, ClipboardList, ScanLine, ChevronDown, ChevronRight,
   FlaskConical, Pencil, Trash2, BookOpen, FileText, FilePlus,
-  Search, X, Phone, Droplets, Archive, Plus,
+  Search, X, Phone, Droplets, Archive, Plus, Upload, Printer,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { parseGS1 } from "../utils/gs1Parser";
 import { parseDiuresisBarcode } from "../utils/diuresisParser";
+import { apiFetch, setToken, TOKEN_KEY, USER_KEY } from "../lib/api";
+import { formatExp, validarFechaGS1, getEstado, fmtDT } from "../lib/format";
+import { RolBadge, EstadoBadge, TempBadge } from "./shared/Badges";
+import { SectionHead, FErr } from "./shared/SectionHead";
+import type { InvRow, GroupedItem, Protocolo, Anexo, DiuresisRow, ProductForm, User } from "../types";
 
-// ── HTTP client con JWT ──────────────────────────────────────────────────────
-const TOKEN_KEY = "biostock_token";
-const USER_KEY  = "biostock_user";
-
-let authToken: string | null = (typeof localStorage !== "undefined") ? localStorage.getItem(TOKEN_KEY) : null;
-
-function setToken(t: string | null) {
-  authToken = t;
-  if (t) localStorage.setItem(TOKEN_KEY, t);
-  else   localStorage.removeItem(TOKEN_KEY);
-}
-
-async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-  const headers = new Headers(opts.headers || {});
-  if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
-  if (opts.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const res = await fetch(`/api/v1${path}`, { ...opts, headers });
-  if (res.status === 401 && path !== "/login") {
-    setToken(null);
-    localStorage.removeItem(USER_KEY);
-    if (!window.location.search.includes("noreload")) window.location.reload();
-  }
-  return res;
-}
-
-// ── Utilidades ────────────────────────────────────────────────────────────────
-
-function formatExp(exp: string) {
-  if (!exp || exp.length !== 6) return exp || "—";
-  return `${exp.slice(4, 6)}/${exp.slice(2, 4)}/${2000 + parseInt(exp.slice(0, 2))}`;
-}
-
-function validarFechaGS1(v: string): string | null {
-  if (!v) return "Obligatorio";
-  if (!/^\d{6}$/.test(v)) return "6 dígitos AAMMDD";
-  const m = parseInt(v.slice(2, 4)), d = parseInt(v.slice(4, 6));
-  const y = 2000 + parseInt(v.slice(0, 2));
-  if (m < 1 || m > 12) return `Mes inválido: ${m}`;
-  if (d < 1 || d > new Date(y, m, 0).getDate()) return `Día inválido: ${d}`;
-  return null;
-}
-
-function getEstado(exp: string): "activo" | "por-vencer" | "vencido" {
-  if (!exp || exp.length !== 6) return "activo";
-  const y = 2000 + parseInt(exp.slice(0, 2));
-  const m = parseInt(exp.slice(2, 4)) - 1;
-  const d = parseInt(exp.slice(4, 6));
-  const dias = Math.floor((new Date(y, m, d).getTime() - new Date().setHours(0,0,0,0)) / 86400000);
-  return dias < 0 ? "vencido" : dias <= 90 ? "por-vencer" : "activo";
-}
-
-function fmtDT(iso: string) {
-  if (!iso) return { fecha: "—", hora: "—" };
-  const d = new Date(iso);
-  return {
-    fecha: d.toLocaleDateString("es-CL"),
-    hora: d.toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" }),
-  };
-}
-
-// ── Tipos ─────────────────────────────────────────────────────────────────────
-
-interface InvRow {
-  id: string; gtin: string; lot: string; expiration: string; usuario: string;
-  nombre?: string; detalle?: string; seccion?: string; temperatura?: string; preparacion?: string;
-}
-interface GroupedItem {
-  gtin: string; lot: string; nombre: string; detalle: string; seccion: string;
-  expiration: string; temperatura: string; preparacion: string; cantidad: number; itemIds: string[];
-}
-interface Protocolo {
-  id: string; titulo: string; seccion: string; contenido: string;
-  autor: string; created_at: string; updated_at: string;
-}
-interface Anexo {
-  id: string; servicio: string; salas: string; numero: string;
-  creado_por: string; created_at: string; updated_at: string;
-}
-interface DiuresisRow {
-  id: string; num_peticion: string; rut_paciente: string; nombre_paciente: string;
-  diuresis_ml: string; peso: string; talla: string; baja_motivo: string;
-  obs_rechazo: string; motivo_vih: string; usuario: string; fecha: string;
-  archivado: number;
-}
-interface ProductForm {
-  gtin: string; lot: string; exp: string; nombre: string; detalle: string;
-  seccion: string; pack: string; temperatura: string; preparacion: string;
-}
 
 const EMPTY_FORM: ProductForm = {
   gtin: "", lot: "", exp: "", nombre: "", detalle: "",
@@ -134,50 +51,12 @@ const tabBtn = (active: boolean): React.CSSProperties => ({
   color: active ? "white" : "#64748b",
   boxShadow: active ? "0 4px 12px rgba(0,90,156,0.2)" : "none",
 });
-const rolColor: Record<string, { bg: string; color: string }> = {
-  ADMIN:        { bg: "rgba(16,185,129,0.15)",  color: "#059669" },
-  TECNOLOGO:    { bg: "rgba(0,90,156,0.12)",    color: "#005a9c" },
-  TECNICO:      { bg: "rgba(99,102,241,0.12)",  color: "#4338ca" },
-  TOMA_MUESTRA: { bg: "rgba(245,158,11,0.12)",  color: "#d97706" },
-};
-const rolLabel: Record<string, string> = {
-  ADMIN: "Administrador", TECNOLOGO: "Tecnólogo Médico",
-  TECNICO: "Técnico Lab.", TOMA_MUESTRA: "Toma de Muestras",
-};
-
-// ── Sub-componentes ───────────────────────────────────────────────────────────
-
-function EstadoBadge({ estado }: { estado: "activo"|"por-vencer"|"vencido" }) {
-  const c = { activo: { l:"Activo", bg:"rgba(16,185,129,0.12)", co:"#059669" }, "por-vencer": { l:"Por Vencer", bg:"rgba(245,158,11,0.12)", co:"#d97706" }, vencido: { l:"Vencido", bg:"rgba(239,68,68,0.12)", co:"#dc2626" } }[estado];
-  return <span style={{ display:"inline-block", background:c.bg, color:c.co, fontWeight:700, fontSize:"11px", padding:"3px 9px", borderRadius:"6px", whiteSpace:"nowrap" }}>{c.l}</span>;
-}
-function TempBadge({ temp }: { temp: string }) {
-  const m: Record<string,{bg:string;co:string;l:string}> = { Refrigerado:{bg:"rgba(56,189,248,0.12)",co:"#0369a1",l:"Refrig."}, Congelado:{bg:"rgba(99,102,241,0.12)",co:"#4338ca",l:"Congel."}, Ambiente:{bg:"rgba(16,185,129,0.12)",co:"#059669",l:"Amb."} };
-  const c = m[temp] || { bg:"rgba(0,0,0,0.05)", co:"#475569", l:temp };
-  return <span style={{ display:"inline-block", background:c.bg, color:c.co, fontWeight:700, fontSize:"11px", padding:"3px 9px", borderRadius:"6px" }}>{c.l}</span>;
-}
-function RolBadge({ rol }: { rol: string }) {
-  const c = rolColor[rol] || { bg:"rgba(0,0,0,0.05)", color:"#64748b" };
-  return <span style={{ display:"inline-block", ...c, fontWeight:700, fontSize:"11px", padding:"3px 9px", borderRadius:"6px", whiteSpace:"nowrap" }}>{rolLabel[rol] || rol}</span>;
-}
-function FErr({ msg }: { msg: string|null }) {
-  return msg ? <div style={{ color:"#dc2626", fontSize:"11px", fontWeight:600, marginTop:"3px" }}>⚠ {msg}</div> : null;
-}
-function SectionHead({ title, icon, action }: { title: string; icon: React.ReactNode; action?: React.ReactNode }) {
-  return (
-    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px", flexWrap:"wrap", gap:"12px" }}>
-      <h2 style={{ display:"flex", alignItems:"center", gap:"10px", color:"#005a9c", fontWeight:800, margin:0, fontSize:"20px" }}>{icon}{title}</h2>
-      {action}
-    </div>
-  );
-}
-
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function InventoryApp() {
   // ─ Auth
   const [showLogin, setShowLogin]       = useState(true);
-  const [currentUser, setCurrentUser]   = useState<any>(null);
+  const [currentUser, setCurrentUser]   = useState<User|null>(null);
   const [usernameInput, setUsernameInput] = useState("");
   const [pinInput, setPinInput]         = useState("");
   const [view, setView]                 = useState("Dashboard");
@@ -266,6 +145,13 @@ export default function InventoryApp() {
   // ─ Anomaly check de diuresis
   const [anomalyWarning, setAnomalyWarning] = useState<string|null>(null);
 
+  // ─ Bulk import desde Excel
+  const [bulkPreview, setBulkPreview] = useState<Record<string, any>[]>([]);
+  const [bulkErrors, setBulkErrors]   = useState<string[]>([]);
+  const [bulkFileName, setBulkFileName] = useState<string>("");
+  const [bulkImporting, setBulkImporting] = useState(false);
+  const bulkFileRef = useRef<HTMLInputElement>(null);
+
   const barcodeBuffer  = useRef("");
   const scanInputRef   = useRef<HTMLInputElement>(null);
   const diurScanRef    = useRef<HTMLInputElement>(null);
@@ -273,7 +159,8 @@ export default function InventoryApp() {
   // ── Restaurar sesión desde localStorage ──────────────────────────────────────
   useEffect(() => {
     const saved = localStorage.getItem(USER_KEY);
-    if (saved && authToken) {
+    const tok = localStorage.getItem(TOKEN_KEY);
+    if (saved && tok) {
       try {
         JSON.parse(saved); // valida formato
         // Verificar token con /api/me antes de confiar
@@ -383,7 +270,7 @@ export default function InventoryApp() {
   };
 
   const registrarEnDB = async (p: { gtin:string; lot:string; expiration:string }) => {
-    await apiFetch(`/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...p, scanDate:new Date().toISOString(), usuario:currentUser.nombre }) });
+    await apiFetch(`/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...p, scanDate:new Date().toISOString(), usuario:currentUser!.nombre }) });
     fetchData();
   };
 
@@ -401,7 +288,7 @@ export default function InventoryApp() {
     if (!form.gtin || !form.lot) { toast("GTIN y Lote son obligatorios.", "error"); return; }
     if (!productoExiste && (!form.nombre || !form.seccion)) { toast("Nombre y Sección son obligatorios para clasificar.", "error"); return; }
     if (!productoExiste || isAdmin) {
-      await apiFetch(`/producto`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:form.gtin, nombre:form.nombre, detalle:form.detalle, pack:form.pack, seccion:form.seccion, temperatura:form.temperatura, preparacion:form.preparacion, usuario:currentUser.nombre }) });
+      await apiFetch(`/producto`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:form.gtin, nombre:form.nombre, detalle:form.detalle, pack:form.pack, seccion:form.seccion, temperatura:form.temperatura, preparacion:form.preparacion, usuario:currentUser!.nombre }) });
     }
     await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
     cerrarModal();
@@ -417,9 +304,9 @@ export default function InventoryApp() {
   const guardarEdicion = async () => {
     if (!editTarget) return;
     const err = validarFechaGS1(editForm.newExp); setEditExpError(err); if (err) return;
-    await apiFetch(`/producto/${editTarget.gtin}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ nombre:editForm.nombre, detalle:editForm.detalle, pack:editForm.pack, seccion:editForm.seccion, temperatura:editForm.temperatura, preparacion:editForm.preparacion, usuario:currentUser.nombre }) });
+    await apiFetch(`/producto/${editTarget.gtin}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ nombre:editForm.nombre, detalle:editForm.detalle, pack:editForm.pack, seccion:editForm.seccion, temperatura:editForm.temperatura, preparacion:editForm.preparacion, usuario:currentUser!.nombre }) });
     if (editForm.newLot !== editTarget.lot || editForm.newExp !== editTarget.expiration) {
-      await apiFetch(`/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser.nombre }) });
+      await apiFetch(`/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser!.nombre }) });
     }
     setShowEditModal(false); setEditTarget(null); fetchData();
     setActiveSection(editForm.seccion); setExpandedSections(prev => new Set([...prev, editForm.seccion]));
@@ -427,39 +314,39 @@ export default function InventoryApp() {
 
   const eliminarProducto = async () => {
     if (!editTarget || !await confirmDialog(`¿Eliminar "${editTarget.nombre}" y dar de baja su stock?`, { kind:"danger" })) return;
-    await apiFetch(`/producto/${editTarget.gtin}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    await apiFetch(`/producto/${editTarget.gtin}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser!.nombre }) });
     setShowEditModal(false); setEditTarget(null); fetchData();
   };
 
   const consumirUnidad = async (g: GroupedItem) => {
     if (!await confirmDialog(`¿Descontar 1 unidad de "${g.nombre}" (Lote: ${g.lot})?`, { kind:"danger" })) return;
-    await apiFetch(`/inventario/${g.itemIds[0]}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    await apiFetch(`/inventario/${g.itemIds[0]}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser!.nombre }) });
     fetchData();
   };
 
   // ── Protocolos ───────────────────────────────────────────────────────────────
   const guardarProtocolo = async () => {
     if (!protoForm.titulo.trim() || !protoForm.seccion.trim() || !protoForm.contenido.trim()) { toast("Título, sección y contenido son obligatorios.", "error"); return; }
-    if (editProto) await apiFetch(`/protocolos/${editProto.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser.nombre }) });
-    else { await apiFetch(`/protocolos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser.nombre }) }); setExpandedProtoSecs(p => new Set([...p, protoForm.seccion])); }
+    if (editProto) await apiFetch(`/protocolos/${editProto.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser!.nombre }) });
+    else { await apiFetch(`/protocolos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...protoForm, usuario:currentUser!.nombre }) }); setExpandedProtoSecs(p => new Set([...p, protoForm.seccion])); }
     setShowProtoModal(false); fetchData();
   };
   const eliminarProtocolo = async (p: Protocolo) => {
     if (!await confirmDialog(`¿Eliminar "${p.titulo}"?`, { kind:"danger" })) return;
-    await apiFetch(`/protocolos/${p.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    await apiFetch(`/protocolos/${p.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser!.nombre }) });
     fetchData();
   };
 
   // ── Anexos ───────────────────────────────────────────────────────────────────
   const guardarAnexo = async () => {
     if (!anexoForm.servicio.trim() || !anexoForm.numero.trim()) { toast("Servicio y Número son obligatorios.", "error"); return; }
-    if (editAnexo) await apiFetch(`/anexos/${editAnexo.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser.nombre }) });
-    else await apiFetch(`/anexos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser.nombre }) });
+    if (editAnexo) await apiFetch(`/anexos/${editAnexo.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser!.nombre }) });
+    else await apiFetch(`/anexos`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...anexoForm, usuario:currentUser!.nombre }) });
     setShowAnexoModal(false); setEditAnexo(null); setAnexoForm({ servicio:"", salas:"", numero:"" }); fetchData();
   };
   const eliminarAnexo = async (a: Anexo) => {
     if (!await confirmDialog(`¿Eliminar el anexo de "${a.servicio}"?`, { kind:"danger" })) return;
-    await apiFetch(`/anexos/${a.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    await apiFetch(`/anexos/${a.id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser!.nombre }) });
     fetchData();
   };
 
@@ -503,13 +390,13 @@ export default function InventoryApp() {
   const guardarDiuresis = async () => {
     if (!diuresisForm.num_peticion.trim()) { toast("N° Petición es obligatorio.", "error"); return; }
     if (!diuresisForm.baja_motivo.trim()) { toast("Motivo de Baja es obligatorio.", "error"); return; }
-    await apiFetch(`/diuresis`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...diuresisForm, usuario:currentUser.nombre }) });
+    await apiFetch(`/diuresis`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...diuresisForm, usuario:currentUser!.nombre }) });
     setDiuresisForm({ ...EMPTY_DIURESIS }); fetchData();
   };
 
   const eliminarDiuresis = async (id: string) => {
     if (!await confirmDialog("¿Eliminar este registro?", { kind:"danger" })) return;
-    await apiFetch(`/diuresis/${id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser.nombre }) });
+    await apiFetch(`/diuresis/${id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser!.nombre }) });
     fetchData();
   };
 
@@ -526,6 +413,118 @@ export default function InventoryApp() {
   };
 
   useEffect(() => { if (view === "Diuresis" && diuresisTab === "historico") buscarHistorico(); }, [diuresisTab, view]);
+
+  // ── Bulk import desde Excel ─────────────────────────────────────────────────
+  const handleBulkFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBulkFileName(file.name);
+    setBulkErrors([]); setBulkPreview([]);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: "" });
+      if (rows.length === 0) { setBulkErrors(["El archivo no contiene filas."]); return; }
+      // Normalizar nombres de columnas (case-insensitive, sin acentos)
+      const norm = (k: string) => k.toString().trim().toLowerCase().replace(/[áàäâ]/g,"a").replace(/[éèëê]/g,"e").replace(/[íìïî]/g,"i").replace(/[óòöô]/g,"o").replace(/[úùüû]/g,"u");
+      const map: Record<string, string> = {
+        gtin: "gtin", "gtin-14": "gtin",
+        nombre: "nombre", "nombre del control": "nombre", control: "nombre",
+        detalle: "detalle", presentacion: "detalle", presentación: "detalle",
+        pack: "pack", "pack size": "pack",
+        seccion: "seccion", "sección": "seccion",
+        temperatura: "temperatura", temp: "temperatura",
+        preparacion: "preparacion", "preparación": "preparacion", instrucciones: "preparacion",
+      };
+      const cleanRows = rows.map(r => {
+        const out: Record<string, any> = {};
+        for (const k of Object.keys(r)) {
+          const target = map[norm(k)];
+          if (target) out[target] = String(r[k]).trim();
+        }
+        return out;
+      });
+      const errs: string[] = [];
+      cleanRows.forEach((r, i) => {
+        if (!r.gtin) errs.push(`Fila ${i+2}: falta GTIN`);
+        else if (!r.nombre) errs.push(`Fila ${i+2}: falta nombre`);
+        else if (!r.seccion) errs.push(`Fila ${i+2}: falta sección`);
+      });
+      setBulkPreview(cleanRows);
+      setBulkErrors(errs.slice(0, 10));
+    } catch (e: any) {
+      setBulkErrors([`Error leyendo archivo: ${e.message}`]);
+    }
+  };
+
+  const ejecutarBulkImport = async () => {
+    if (bulkPreview.length === 0) { toast("Sin filas para importar.", "error"); return; }
+    const valid = bulkPreview.filter(r => r.gtin && r.nombre && r.seccion);
+    if (valid.length === 0) { toast("Ninguna fila válida.", "error"); return; }
+    if (!await confirmDialog(`Importar ${valid.length} controles al maestro?`, { title:"Confirmar importación" })) return;
+    setBulkImporting(true);
+    try {
+      const res = await apiFetch("/inventario/bulk-import", { method:"POST", body: JSON.stringify({ items: valid }) });
+      const d = await res.json();
+      if (d.success) {
+        toast(`Importado: ${d.inserted} nuevos, ${d.updated} actualizados, ${d.skipped} saltados.`, "success");
+        setBulkPreview([]); setBulkFileName(""); setBulkErrors([]);
+        if (bulkFileRef.current) bulkFileRef.current.value = "";
+        fetchData();
+      } else {
+        toast(d.message || "Error en importación.", "error");
+      }
+    } catch (e: any) {
+      toast(`Error: ${e.message}`, "error");
+    } finally {
+      setBulkImporting(false);
+    }
+  };
+
+  // ── Export PDF — print-friendly view en nueva pestaña, user → Cmd+P → Save PDF
+  const exportarPDF = (titulo: string, filas: string[][], headers: string[]) => {
+    const w = window.open("", "_blank");
+    if (!w) { toast("Habilita popups para exportar PDF.", "error"); return; }
+    const fecha = new Date().toLocaleString("es-CL");
+    const tableRows = filas.map(r => `<tr>${r.map(c => `<td>${(c||"").toString().replace(/</g,"&lt;")}</td>`).join("")}</tr>`).join("");
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${titulo}</title>
+      <style>
+        body { font-family: 'Helvetica',sans-serif; margin: 30px; color: #1e293b; }
+        h1 { color: #005a9c; font-size: 20px; margin: 0 0 4px; }
+        .meta { color: #64748b; font-size: 11px; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        th { background: #005a9c; color: white; padding: 8px; text-align: left; }
+        td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; }
+        tr:nth-child(even) td { background: #f8fafc; }
+        .footer { margin-top: 30px; font-size: 10px; color: #64748b; }
+        .signature { margin-top: 60px; border-top: 1px solid #1e293b; width: 280px; padding-top: 6px; font-size: 11px; }
+        @media print { body { margin: 15px; } }
+      </style></head><body>
+      <h1>${titulo}</h1>
+      <div class="meta">BIO-STOCK LIMS · Generado por <strong>${currentUser!.nombre}</strong> (${currentUser!.rol}) · ${fecha}</div>
+      <table><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${tableRows}</tbody></table>
+      <div class="signature">Firma del responsable</div>
+      <div class="footer">Documento confidencial. Uso interno del laboratorio clínico.</div>
+      <script>window.onload=()=>{ window.print(); }</script>
+      </body></html>`);
+    w.document.close();
+    apiFetch("/log-accion", { method:"POST", body: JSON.stringify({ accion:"EXPORTAR PDF", detalles:`${titulo} (${filas.length} filas)` }) }).catch(()=>{});
+  };
+
+  const exportarLogsPDF = () => {
+    const headers = ["FECHA","HORA","USUARIO","PERFIL","EVENTO","DETALLES","IP"];
+    const filas = logs.map((l:any) => { const { fecha, hora } = fmtDT(l.fecha); return [fecha, hora, l.usuario, l.perfil||"—", l.accion, l.detalles, l.ip||"—"]; });
+    exportarPDF(`Auditoría — ${logs.length} eventos`, filas, headers);
+  };
+
+  const exportarDiuresisPDF = () => {
+    const headers = ["FECHA","HORA","PETICIÓN","RUT","NOMBRE","DIURESIS","MOTIVO BAJA","USUARIO"];
+    const filas = diuresisHist.map(d => { const { fecha, hora } = fmtDT(d.fecha); return [fecha, hora, d.num_peticion, d.rut_paciente||"—", d.nombre_paciente||"—", d.diuresis_ml||"—", d.baja_motivo, d.usuario]; });
+    exportarPDF(`Diuresis Histórico — ${diuresisHist.length} registros`, filas, headers);
+  };
 
   // ── Auth ─────────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
@@ -648,6 +647,7 @@ export default function InventoryApp() {
           {canProtocolos && <button onClick={()=>setView("Protocolos")} style={navBtn(view==="Protocolos")}><FileText size={14}/> Protocolos</button>}
           <button onClick={()=>setView("Anexos")} style={navBtn(view==="Anexos")}><Phone size={14}/> Anexos Telefónicos</button>
           <button onClick={()=>setView("Diuresis")} style={navBtn(view==="Diuresis")}><Droplets size={14}/> Diuresis y Bajas</button>
+          {isAdmin && <button onClick={()=>setView("Importar")} style={navBtn(view==="Importar")}><Upload size={14}/> Importar Excel</button>}
           {isAdmin && <button onClick={()=>setView("Usuarios")} style={navBtn(view==="Usuarios")}><Users size={14}/> Personal</button>}
           {isAdmin && <button onClick={()=>setView("Logs")} style={navBtn(view==="Logs")}><History size={14}/> Auditoría</button>}
           {canInventario && (
@@ -693,8 +693,8 @@ export default function InventoryApp() {
         <div style={{ marginTop:"auto", paddingTop:12 }}>
           <div style={{ background:"rgba(0,0,0,0.03)", padding:12, borderRadius:10, border:"1px solid rgba(255,255,255,0.5)" }}>
             <div style={{ fontSize:"10px", color:"#64748b", marginBottom:3, fontWeight:700 }}>FIRMA ACTIVA</div>
-            <div style={{ fontWeight:800, color:"#0f172a", fontSize:"12px", marginBottom:6 }}>{currentUser.nombre}</div>
-            <RolBadge rol={currentUser.rol} />
+            <div style={{ fontWeight:800, color:"#0f172a", fontSize:"12px", marginBottom:6 }}>{currentUser!.nombre}</div>
+            <RolBadge rol={currentUser!.rol} />
             <button onClick={handleLogout} style={{ width:"100%", padding:8, background:"rgba(239,68,68,0.1)", color:"#ef4444", border:"none", borderRadius:8, cursor:"pointer", fontSize:"12px", fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:5, marginTop:10 }}>
               <LogOut size={12}/> CERRAR SESIÓN
             </button>
@@ -742,7 +742,7 @@ export default function InventoryApp() {
                           <td style={{ padding:"12px 13px", textAlign:"center" }}><EstadoBadge estado={getEstado(g.expiration)}/></td>
                           <td style={{ padding:"12px 13px", textAlign:"center" }}>
                             <div style={{ display:"flex", gap:5, justifyContent:"center", flexWrap:"wrap" }}>
-                              {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); apiFetch(`/log-accion`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({usuario:currentUser.nombre,accion:"VER PREPARACIÓN",detalles:`${g.nombre} | ${g.lot}`})}).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
+                              {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); apiFetch(`/log-accion`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({usuario:currentUser!.nombre,accion:"VER PREPARACIÓN",detalles:`${g.nombre} | ${g.lot}`})}).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
                               {isAdmin && <button onClick={()=>abrirEdicion(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
                               {canConsumir && <button onClick={()=>consumirUnidad(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>− Consumir</button>}
                             </div>
@@ -884,7 +884,10 @@ export default function InventoryApp() {
                 {diuresisHist.length === 0
                   ? <div style={{ ...glass, padding:40, textAlign:"center", color:"#94a3b8" }}><Archive size={36} style={{ opacity:0.2, marginBottom:10 }}/><p style={{ fontWeight:700, margin:0 }}>Sin registros — aplica filtros y haz clic en Buscar</p></div>
                   : <div style={{ ...glass, overflow:"hidden" }}>
-                      <div style={{ padding:"12px 16px", borderBottom:"1px solid rgba(0,0,0,0.05)", fontSize:"12px", fontWeight:700, color:"#64748b" }}>{diuresisHist.length} resultado{diuresisHist.length!==1?"s":""}</div>
+                      <div style={{ padding:"12px 16px", borderBottom:"1px solid rgba(0,0,0,0.05)", fontSize:"12px", fontWeight:700, color:"#64748b", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                        <span>{diuresisHist.length} resultado{diuresisHist.length!==1?"s":""}</span>
+                        <button onClick={exportarDiuresisPDF} style={{ display:"flex", alignItems:"center", gap:5, padding:"6px 12px", background:"#005a9c", color:"white", border:"none", borderRadius:7, fontWeight:700, cursor:"pointer", fontSize:"11px" }}><Printer size={11}/> PDF</button>
+                      </div>
                       <div style={{ overflowX:"auto" }}>
                         <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"12px", minWidth:900 }}>
                           <thead><tr style={{ background:"rgba(0,90,156,0.04)" }}>{["FECHA","HORA","PETICIÓN","RUT","NOMBRE","DIURESIS","MOTIVO BAJA","OBS.","USUARIO"].map(h=><th key={h} style={{ padding:"10px 12px", fontWeight:800, color:"#005a9c", fontSize:"10px", textAlign:"left", whiteSpace:"nowrap" }}>{h}</th>)}</tr></thead>
@@ -968,6 +971,80 @@ export default function InventoryApp() {
         })()}
 
         {/* ─── USUARIOS ────────────────────────────────────────────────────── */}
+        {/* ─── IMPORTAR EXCEL ──────────────────────────────────────────────── */}
+        {view === "Importar" && isAdmin && (
+          <div style={{ maxWidth: 1000 }}>
+            <SectionHead title="Importar Maestro desde Excel" icon={<Upload/>}/>
+            <div style={{ ...glass, padding: 22, marginBottom: 16 }}>
+              <div style={{ fontSize:"12px", color:"#64748b", marginBottom:12, lineHeight:1.55 }}>
+                Sube un archivo <strong>.xlsx</strong> con las columnas: <code style={{ background:"rgba(0,0,0,0.05)", padding:"1px 6px", borderRadius:4 }}>gtin</code>, <code style={{ background:"rgba(0,0,0,0.05)", padding:"1px 6px", borderRadius:4 }}>nombre</code>, <code style={{ background:"rgba(0,0,0,0.05)", padding:"1px 6px", borderRadius:4 }}>seccion</code>, y opcionalmente <code>detalle</code>, <code>pack</code>, <code>temperatura</code>, <code>preparacion</code>. Los nombres de columnas no son sensibles a mayúsculas/acentos. Máximo 5,000 filas.
+              </div>
+              <input
+                ref={bulkFileRef}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                onChange={handleBulkFile}
+                style={{ padding:"10px", border:"2px dashed rgba(0,90,156,0.3)", borderRadius:10, width:"100%", background:"rgba(255,255,255,0.6)", cursor:"pointer", fontSize:"13px" }}
+              />
+              {bulkFileName && (
+                <div style={{ marginTop:10, fontSize:"12px", color:"#475569" }}>
+                  Archivo: <strong>{bulkFileName}</strong> · {bulkPreview.length} filas detectadas
+                </div>
+              )}
+            </div>
+
+            {bulkErrors.length > 0 && (
+              <div style={{ ...glass, background:"rgba(239,68,68,0.05)", border:"1px solid rgba(239,68,68,0.25)", padding:14, marginBottom:14 }}>
+                <div style={{ fontWeight:800, color:"#dc2626", marginBottom:8, fontSize:"12px" }}>{bulkErrors.length} ERRORES DETECTADOS (mostrando 10):</div>
+                <ul style={{ margin:0, paddingLeft:20, fontSize:"12px", color:"#7f1d1d" }}>{bulkErrors.map((e,i) => <li key={i}>{e}</li>)}</ul>
+              </div>
+            )}
+
+            {bulkPreview.length > 0 && (
+              <div style={{ ...glass, overflow:"hidden", marginBottom:14 }}>
+                <div style={{ padding:"12px 16px", borderBottom:"1px solid rgba(0,0,0,0.05)", fontSize:"12px", fontWeight:700, color:"#64748b" }}>
+                  Previsualización ({Math.min(bulkPreview.length, 20)} de {bulkPreview.length})
+                </div>
+                <div style={{ overflowX:"auto" }}>
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"11px" }}>
+                    <thead><tr style={{ background:"rgba(0,90,156,0.04)" }}>
+                      {["GTIN","Nombre","Sección","Detalle","Temp.","Preparación","Estado"].map(h => <th key={h} style={{ padding:"8px 10px", textAlign:"left", fontWeight:800, color:"#005a9c" }}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {bulkPreview.slice(0, 20).map((r, i) => {
+                        const ok = r.gtin && r.nombre && r.seccion;
+                        return (
+                          <tr key={i} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                            <td style={{ padding:"6px 10px", fontFamily:"'Roboto Mono',monospace" }}>{r.gtin}</td>
+                            <td style={{ padding:"6px 10px", fontWeight:700 }}>{r.nombre}</td>
+                            <td style={{ padding:"6px 10px" }}>{r.seccion}</td>
+                            <td style={{ padding:"6px 10px", color:"#64748b" }}>{r.detalle || "—"}</td>
+                            <td style={{ padding:"6px 10px" }}>{r.temperatura || "Refrigerado"}</td>
+                            <td style={{ padding:"6px 10px", color:"#64748b", maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.preparacion || "—"}</td>
+                            <td style={{ padding:"6px 10px" }}>
+                              {ok ? <span style={{ color:"#059669", fontWeight:700 }}>✓ OK</span> : <span style={{ color:"#dc2626", fontWeight:700 }}>✗ Inválido</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {bulkPreview.length > 0 && (
+              <button
+                onClick={ejecutarBulkImport}
+                disabled={bulkImporting}
+                style={{ padding:"12px 28px", background:"#005a9c", color:"white", border:"none", borderRadius:10, fontWeight:800, cursor: bulkImporting ? "wait" : "pointer", fontSize:"14px", boxShadow:"0 4px 14px rgba(0,90,156,0.3)", opacity: bulkImporting ? 0.6 : 1 }}
+              >
+                {bulkImporting ? "IMPORTANDO…" : `IMPORTAR ${bulkPreview.filter(r => r.gtin && r.nombre && r.seccion).length} CONTROLES`}
+              </button>
+            )}
+          </div>
+        )}
+
         {view === "Usuarios" && isAdmin && (
           <div style={{ maxWidth:860 }}>
             <SectionHead title="Personal del Laboratorio" icon={<UserPlus/>}/>
@@ -993,7 +1070,7 @@ export default function InventoryApp() {
                     <tr key={u.id} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
                       <td style={{ padding:"14px 18px", fontWeight:800, color:"#1e293b" }}>{u.nombre}</td>
                       <td style={{ padding:"14px 10px" }}><RolBadge rol={u.rol}/></td>
-                      <td style={{ padding:"14px 10px" }}>{u.nombre!==currentUser.nombre&&<button onClick={async ()=>{ if(await confirmDialog(`¿Revocar acceso de ${u.nombre}?`, { kind:"danger" })) apiFetch(`/usuarios/${u.id}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({adminUser:currentUser.nombre})}).then(fetchData); }} style={{ color:"#ef4444", border:"none", background:"none", cursor:"pointer", fontWeight:800, fontSize:"12px" }}>REVOCAR</button>}</td>
+                      <td style={{ padding:"14px 10px" }}>{u.nombre!==currentUser!.nombre&&<button onClick={async ()=>{ if(await confirmDialog(`¿Revocar acceso de ${u.nombre}?`, { kind:"danger" })) apiFetch(`/usuarios/${u.id}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({adminUser:currentUser!.nombre})}).then(fetchData); }} style={{ color:"#ef4444", border:"none", background:"none", cursor:"pointer", fontWeight:800, fontSize:"12px" }}>REVOCAR</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1005,7 +1082,9 @@ export default function InventoryApp() {
         {/* ─── AUDITORÍA ───────────────────────────────────────────────────── */}
         {view === "Logs" && isAdmin && (
           <div>
-            <SectionHead title="Registro de Auditoría" icon={<ClipboardList/>}/>
+            <SectionHead title="Registro de Auditoría" icon={<ClipboardList/>}
+              action={<button onClick={exportarLogsPDF} style={{ display:"flex", alignItems:"center", gap:7, padding:"10px 18px", background:"#005a9c", color:"white", border:"none", borderRadius:10, fontWeight:800, cursor:"pointer", fontSize:"13px", boxShadow:"0 4px 14px rgba(0,90,156,0.3)" }}><Printer size={15}/> Exportar PDF</button>}
+            />
             <div style={{ ...glass, overflow:"hidden" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"12px" }}>
                 <thead><tr style={{ background:"rgba(0,0,0,0.03)", textAlign:"left", color:"#64748b" }}>

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm uninstall *)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('deps:', Object.keys\\(p.dependencies||{}\\).join\\(','\\)\\); console.log\\('devDeps:', Object.keys\\(p.devDependencies||{}\\).join\\(','\\)\\)\")"
+    ]
+  }
+}
