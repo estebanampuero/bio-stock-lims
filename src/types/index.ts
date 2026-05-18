@@ -9,11 +9,13 @@ export interface User {
 
 export interface InvRow extends Partial<PrepFields> {
   id: string; gtin: string; lot: string; expiration: string; usuario: string;
-  nombre?: string; detalle?: string; seccion?: string; temperatura?: string; preparacion?: string;
+  nombre?: string; abreviado?: string; detalle?: string; seccion?: string;
+  temperatura?: string; preparacion?: string;
 }
 
 export interface GroupedItem extends Partial<PrepFields> {
-  gtin: string; lot: string; nombre: string; detalle: string; seccion: string;
+  gtin: string; lot: string; nombre: string; abreviado: string;
+  detalle: string; seccion: string;
   expiration: string; temperatura: string; preparacion: string;
   cantidad: number; itemIds: string[];
 }
@@ -47,11 +49,14 @@ export interface PrepFields {
   duracion_dias: number | null;
   cantidad_alicuotas: number | null;
   volumen_ul: number | null;
+  dias_uso_aprox: number | null;             // días de autonomía por unidad
 }
 
 export interface ProductForm extends PrepFields {
-  gtin: string; lot: string; exp: string; nombre: string; detalle: string;
-  seccion: string; pack: string; temperatura: string; preparacion: string;
+  gtin: string; lot: string; exp: string;
+  nombre: string; abreviado: string;
+  detalle: string; seccion: string; pack: string;
+  temperatura: string; preparacion: string;
 }
 
 export interface MaestroRow extends PrepFields {

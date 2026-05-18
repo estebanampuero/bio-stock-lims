@@ -5,7 +5,7 @@ import {
   FlaskConical, Pencil, Trash2, BookOpen, FileText, FilePlus,
   Search, X, Phone, Droplets, Archive, Plus, Upload, Printer, LayoutGrid,
 } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LabelList } from "recharts";
 import { parseGS1 } from "../utils/gs1Parser";
 import { parseDiuresisBarcode } from "../utils/diuresisParser";
 import { apiFetch, setToken, TOKEN_KEY, USER_KEY } from "../lib/api";
@@ -26,9 +26,10 @@ const EMPTY_PREP = {
   duracion_dias: null,
   cantidad_alicuotas: null,
   volumen_ul: null,
+  dias_uso_aprox: null,
 };
 const EMPTY_FORM: ProductForm = {
-  gtin: "", lot: "", exp: "", nombre: "", detalle: "",
+  gtin: "", lot: "", exp: "", nombre: "", abreviado: "", detalle: "",
   seccion: "", pack: "", temperatura: "Refrigerado", preparacion: "",
   ...EMPTY_PREP,
 };
@@ -79,7 +80,7 @@ export default function InventoryApp() {
   const [secciones, setSecciones]       = useState<{ nombre: string }[]>([]);
   const [activeSection, setActiveSection] = useState("");
   const [activeProduct, setActiveProduct] = useState<string|null>(null);
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [, setExpandedSections] = useState<Set<string>>(new Set());
   const [searchTerm, setSearchTerm]     = useState("");
   const [laserActive, setLaserActive]   = useState(false);
 
@@ -175,6 +176,7 @@ export default function InventoryApp() {
       setForm(f => ({
         ...f,
         nombre: m.nombre,
+        abreviado: f.abreviado || m.abreviado || "",
         detalle: f.detalle || m.detalle || "",
         seccion: f.seccion || m.seccion || "",
         temperatura: m.almacenamiento_sin_abrir || m.temperatura || f.temperatura,
@@ -187,6 +189,7 @@ export default function InventoryApp() {
         duracion_dias: m.duracion_dias !== undefined ? m.duracion_dias : f.duracion_dias,
         cantidad_alicuotas: m.cantidad_alicuotas !== undefined ? m.cantidad_alicuotas : f.cantidad_alicuotas,
         volumen_ul: m.volumen_ul !== undefined ? m.volumen_ul : f.volumen_ul,
+        dias_uso_aprox: m.dias_uso_aprox !== undefined ? m.dias_uso_aprox : f.dias_uso_aprox,
       }));
       setAutofilled(true);
     } catch (_) {}
@@ -314,7 +317,8 @@ export default function InventoryApp() {
     if (existe) {
       setForm(f => ({
         ...f, gtin, lot: parsed?.lot || f.lot, exp: parsed?.expiration || f.exp,
-        nombre: existe.nombre, detalle: existe.detalle || "", seccion: existe.seccion,
+        nombre: existe.nombre, abreviado: existe.abreviado || "",
+        detalle: existe.detalle || "", seccion: existe.seccion,
         temperatura: existe.almacenamiento_sin_abrir || existe.temperatura || "Refrigerado",
         preparacion: existe.preparacion || "",
         almacenamiento_sin_abrir: existe.almacenamiento_sin_abrir || existe.temperatura || "",
@@ -325,6 +329,7 @@ export default function InventoryApp() {
         duracion_dias: existe.duracion_dias ?? null,
         cantidad_alicuotas: existe.cantidad_alicuotas ?? null,
         volumen_ul: existe.volumen_ul ?? null,
+        dias_uso_aprox: existe.dias_uso_aprox ?? null,
       }));
       setProductoExiste(true); setAutofilled(true);
     } else {
@@ -344,7 +349,8 @@ export default function InventoryApp() {
     const res = await apiFetch(`/producto/${gtin}`); const existe = await res.json();
     if (existe) {
       setForm(f => ({
-        ...f, nombre: existe.nombre, detalle: existe.detalle || "", seccion: existe.seccion,
+        ...f, nombre: existe.nombre, abreviado: existe.abreviado || "",
+        detalle: existe.detalle || "", seccion: existe.seccion,
         temperatura: existe.almacenamiento_sin_abrir || existe.temperatura || "Refrigerado",
         preparacion: existe.preparacion || "",
         almacenamiento_sin_abrir: existe.almacenamiento_sin_abrir || existe.temperatura || "",
@@ -355,6 +361,7 @@ export default function InventoryApp() {
         duracion_dias: existe.duracion_dias ?? null,
         cantidad_alicuotas: existe.cantidad_alicuotas ?? null,
         volumen_ul: existe.volumen_ul ?? null,
+        dias_uso_aprox: existe.dias_uso_aprox ?? null,
       }));
       setProductoExiste(true); setAutofilled(true);
     } else { setProductoExiste(false); setAutofilled(false); }
@@ -368,7 +375,8 @@ export default function InventoryApp() {
     if (!productoExiste && (!form.nombre || !form.seccion)) { toast("Nombre y Sección son obligatorios para clasificar.", "error"); return; }
     if (!productoExiste || isAdmin) {
       await apiFetch(`/producto`, { method:"POST", body: JSON.stringify({
-        gtin: form.gtin, nombre: form.nombre, detalle: form.detalle, pack: form.pack, seccion: form.seccion,
+        gtin: form.gtin, nombre: form.nombre, abreviado: form.abreviado,
+        detalle: form.detalle, pack: form.pack, seccion: form.seccion,
         temperatura: form.almacenamiento_sin_abrir || form.temperatura, preparacion: form.preparacion,
         almacenamiento_sin_abrir: form.almacenamiento_sin_abrir,
         descongelar_min: form.descongelar_min,
@@ -378,6 +386,7 @@ export default function InventoryApp() {
         duracion_dias: form.duracion_dias,
         cantidad_alicuotas: form.cantidad_alicuotas,
         volumen_ul: form.volumen_ul,
+        dias_uso_aprox: form.dias_uso_aprox,
       })});
     }
     await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
@@ -389,7 +398,8 @@ export default function InventoryApp() {
     setEditTarget(g); setEditExpError(null);
     setEditForm({
       gtin: g.gtin, lot: g.lot, exp: g.expiration,
-      nombre: g.nombre, detalle: g.detalle, seccion: g.seccion, pack: "",
+      nombre: g.nombre, abreviado: g.abreviado || "",
+      detalle: g.detalle, seccion: g.seccion, pack: "",
       temperatura: g.temperatura || "Refrigerado", preparacion: g.preparacion || "",
       almacenamiento_sin_abrir: (g.almacenamiento_sin_abrir || g.temperatura || "") as any,
       descongelar_min: g.descongelar_min ?? null,
@@ -399,6 +409,7 @@ export default function InventoryApp() {
       duracion_dias: g.duracion_dias ?? null,
       cantidad_alicuotas: g.cantidad_alicuotas ?? null,
       volumen_ul: g.volumen_ul ?? null,
+      dias_uso_aprox: g.dias_uso_aprox ?? null,
       newLot: g.lot, newExp: g.expiration,
     });
     setShowEditModal(true);
@@ -408,7 +419,8 @@ export default function InventoryApp() {
     if (!editTarget) return;
     const err = validarFechaGS1(editForm.newExp); setEditExpError(err); if (err) return;
     await apiFetch(`/producto/${editTarget.gtin}`, { method:"PUT", body: JSON.stringify({
-      nombre: editForm.nombre, detalle: editForm.detalle, pack: editForm.pack, seccion: editForm.seccion,
+      nombre: editForm.nombre, abreviado: editForm.abreviado,
+      detalle: editForm.detalle, pack: editForm.pack, seccion: editForm.seccion,
       temperatura: editForm.almacenamiento_sin_abrir || editForm.temperatura, preparacion: editForm.preparacion,
       almacenamiento_sin_abrir: editForm.almacenamiento_sin_abrir,
       descongelar_min: editForm.descongelar_min,
@@ -418,6 +430,7 @@ export default function InventoryApp() {
       duracion_dias: editForm.duracion_dias,
       cantidad_alicuotas: editForm.cantidad_alicuotas,
       volumen_ul: editForm.volumen_ul,
+      dias_uso_aprox: editForm.dias_uso_aprox,
     })});
     if (editForm.newLot !== editTarget.lot || editForm.newExp !== editTarget.expiration) {
       await apiFetch(`/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser!.nombre }) });
@@ -704,6 +717,7 @@ export default function InventoryApp() {
     const key = `${item.gtin}||${item.lot}`;
     if (!groupMap[key]) groupMap[key] = {
       gtin: item.gtin, lot: item.lot, nombre: item.nombre || "Sin clasificar",
+      abreviado: item.abreviado || "",
       detalle: item.detalle || "", seccion: item.seccion || "",
       expiration: item.expiration,
       temperatura: item.temperatura || "Refrigerado",
@@ -716,17 +730,12 @@ export default function InventoryApp() {
       duracion_dias: item.duracion_dias ?? null,
       cantidad_alicuotas: item.cantidad_alicuotas ?? null,
       volumen_ul: item.volumen_ul ?? null,
+      dias_uso_aprox: item.dias_uso_aprox ?? null,
       cantidad: 0, itemIds: [],
     };
     groupMap[key].cantidad++; groupMap[key].itemIds.push(item.id);
   }
   const groupedList = Object.values(groupMap);
-
-  const chartData = Object.entries(
-    (activeSection ? inventory.filter(i=>i.seccion===activeSection) : inventory)
-      .filter(i=>i.nombre && (!activeProduct || i.nombre===activeProduct))
-      .reduce((a,i) => { a[i.nombre!]=(a[i.nombre!]||0)+1; return a; }, {} as Record<string,number>)
-  ).map(([name,stock]) => ({ name, stock }));
 
   const filteredAnexos = anexos.filter(a => {
     if (!anexoSearch) return true;
@@ -814,34 +823,27 @@ export default function InventoryApp() {
           )}
         </nav>
 
-        {/* Árbol de secciones */}
-        {view === "Dashboard" && canInventario && (
+        {/* Resumen rápido cuando estás en Inventario */}
+        {view === "Dashboard" && canInventario && sectionTree.length > 0 && (
           <div style={{ flex:1, overflowY:"auto" }}>
-            <div style={{ fontSize:"10px", fontWeight:800, color:"#94a3b8", letterSpacing:"1.2px", marginBottom:8 }}>SECCIONES DEL LABORATORIO</div>
-            {sectionTree.length === 0
-              ? <p style={{ fontSize:"11px", color:"#94a3b8", margin:0, fontStyle:"italic" }}>Sin secciones — escanea un control</p>
-              : sectionTree.map(sec => (
-                <div key={sec.nombre}>
-                  <button onClick={()=>{ setActiveSection(sec.nombre); setActiveProduct(null); setExpandedSections(p=>{ const s=new Set(p); s.has(sec.nombre)?s.delete(sec.nombre):s.add(sec.nombre); return s; }); }}
-                    style={{ width:"100%", display:"flex", alignItems:"center", gap:7, padding:"8px 9px", borderRadius:9, border:"none", background:activeSection===sec.nombre&&!activeProduct?"rgba(0,90,156,0.1)":"transparent", color:activeSection===sec.nombre&&!activeProduct?"#005a9c":"#334155", cursor:"pointer", fontWeight:700, fontSize:"12px", textAlign:"left" }}>
-                    {expandedSections.has(sec.nombre)?<ChevronDown size={12}/>:<ChevronRight size={12}/>}
-                    <FlaskConical size={12}/>
-                    <span style={{ flex:1 }}>{sec.nombre}</span>
-                    <span style={{ fontSize:"10px", background:"rgba(0,90,156,0.1)", color:"#005a9c", padding:"2px 6px", borderRadius:7, fontWeight:800 }}>{sec.count}</span>
-                  </button>
-                  {expandedSections.has(sec.nombre) && sec.productos.map(prod => {
-                    const isA = activeProduct===prod && activeSection===sec.nombre;
-                    return (
-                      <button key={prod} onClick={()=>{ setActiveSection(sec.nombre); setActiveProduct(prod); }}
-                        style={{ width:"100%", display:"flex", alignItems:"center", gap:8, padding:"6px 9px 6px 28px", borderRadius:8, border:"none", background:isA?"#005a9c":"transparent", color:isA?"white":"#475569", cursor:"pointer", fontWeight:600, fontSize:"11px", textAlign:"left" }}>
-                        <span style={{ width:4, height:4, borderRadius:"50%", background:isA?"white":"#94a3b8", flexShrink:0 }}/>
-                        <span style={{ flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{prod}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))
-            }
+            <div style={{ fontSize:"10px", fontWeight:800, color:"#94a3b8", letterSpacing:"1.2px", marginBottom:8 }}>RESUMEN GENERAL</div>
+            <div style={{ background:"rgba(255,255,255,0.5)", border:"1px solid rgba(0,0,0,0.05)", borderRadius:10, padding:12, marginBottom:8 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                <span style={{ fontSize:"11px", color:"#64748b", fontWeight:600 }}>Stock total</span>
+                <span style={{ fontSize:"14px", color:"#005a9c", fontWeight:800 }}>{inventory.length}</span>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                <span style={{ fontSize:"11px", color:"#64748b", fontWeight:600 }}>Secciones</span>
+                <span style={{ fontSize:"14px", color:"#005a9c", fontWeight:800 }}>{sectionTree.length}</span>
+              </div>
+              <div style={{ display:"flex", justifyContent:"space-between" }}>
+                <span style={{ fontSize:"11px", color:"#64748b", fontWeight:600 }}>Controles</span>
+                <span style={{ fontSize:"14px", color:"#005a9c", fontWeight:800 }}>{[...new Set(inventory.map(i=>i.nombre).filter(Boolean))].length}</span>
+              </div>
+            </div>
+            <p style={{ fontSize:"11px", color:"#94a3b8", fontStyle:"italic", margin:0 }}>
+              ↗ Las secciones y filtros están ahora dentro del panel principal
+            </p>
           </div>
         )}
 
@@ -862,55 +864,177 @@ export default function InventoryApp() {
       <main style={{ flex:1, overflowY:"auto", padding:"16px 24px 30px 10px", boxSizing:"border-box" }}>
 
         {/* ─── DASHBOARD / INVENTARIO ───────────────────────────────────────── */}
-        {view === "Dashboard" && canInventario && (
+        {view === "Dashboard" && canInventario && (() => {
+          // Datos del chart: una barra por control (abreviatura). Stock + autonomía.
+          const chartGroups: Record<string, { stock: number; dias_uso: number | null; abreviado: string }> = {};
+          for (const i of inventory) {
+            if (!i.nombre) continue;
+            if (activeSection && i.seccion !== activeSection) continue;
+            if (activeProduct && i.nombre !== activeProduct) continue;
+            const k = i.nombre;
+            if (!chartGroups[k]) chartGroups[k] = { stock: 0, dias_uso: i.dias_uso_aprox ?? null, abreviado: i.abreviado || k.slice(0, 8) };
+            chartGroups[k].stock++;
+          }
+          const chartRows = Object.entries(chartGroups).map(([nombre, v]) => ({
+            nombre, abreviado: v.abreviado, stock: v.stock,
+            autonomia: v.dias_uso ? v.stock * v.dias_uso : null,
+          }));
+          const totalAutonomia = chartRows.reduce((acc, r) => acc + (r.autonomia || 0), 0);
+          const controlesSinDuracion = chartRows.filter(r => r.autonomia === null).length;
+          const ucha = chartRows.length > 0 ? Math.round(totalAutonomia / chartRows.length) : 0;
+          return (
           <>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
+            {/* Header + búsqueda */}
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:12 }}>
               <div>
-                <h2 style={{ margin:0, color:"#005a9c", fontWeight:800, fontSize:"20px" }}>
-                  {activeSection||"Todas las Secciones"}{activeProduct && <span style={{ color:"#64748b", fontWeight:600 }}> › {activeProduct}</span>}
+                <h2 style={{ margin:0, color:"#005a9c", fontWeight:800, fontSize:"22px" }}>
+                  {activeSection || "Inventario completo"}{activeProduct && <span style={{ color:"#64748b", fontWeight:600 }}> › {activeProduct}</span>}
                 </h2>
-                <p style={{ margin:"4px 0 0", color:"#64748b", fontSize:"13px" }}>{groupedList.length} control{groupedList.length!==1?"es":""} · {filteredInv.length} unidad{filteredInv.length!==1?"es":""}</p>
+                <p style={{ margin:"4px 0 0", color:"#64748b", fontSize:"13px" }}>
+                  {chartRows.length} control{chartRows.length!==1?"es":""} · {filteredInv.length} unidad{filteredInv.length!==1?"es":""}
+                </p>
               </div>
-              <input placeholder="🔍 Nombre, lote o GTIN…" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
-                style={{ padding:"10px 15px", width:240, borderRadius:12, border:"1px solid rgba(255,255,255,0.8)", background:"rgba(255,255,255,0.7)", outline:"none", fontWeight:600, fontSize:"13px" }} />
+              <input placeholder="🔍 Nombre, abreviado, lote o GTIN…" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
+                style={{ padding:"10px 15px", width:280, borderRadius:12, border:"1px solid rgba(255,255,255,0.8)", background:"rgba(255,255,255,0.7)", outline:"none", fontWeight:600, fontSize:"13px" }} />
             </div>
 
-            {chartData.length > 0 && (
-              <div style={{ ...glass, padding:"16px 20px", marginBottom:16 }}>
-                <div style={{ fontSize:"11px", fontWeight:700, color:"#64748b", marginBottom:8 }}>Stock — {activeSection||"Todas"}{activeProduct?` › ${activeProduct}`:""}</div>
-                <div style={{ height:160 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={chartData} margin={{ top:0, right:10, left:-20, bottom:0 }}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(0,0,0,0.04)"/><XAxis dataKey="name" tick={{ fontSize:10, fill:"#64748b", fontWeight:600 }} axisLine={false} tickLine={false}/><YAxis tick={{ fontSize:10, fill:"#64748b" }} allowDecimals={false} axisLine={false} tickLine={false}/><Tooltip cursor={{ fill:"rgba(0,0,0,0.02)" }} contentStyle={{ borderRadius:10, border:"none", boxShadow:"0 8px 20px rgba(0,0,0,0.1)", fontSize:13 }}/><Bar dataKey="stock" name="Unidades" fill="#005a9c" radius={[6,6,0,0]} barSize={38}/></BarChart></ResponsiveContainer></div>
+            {/* Tarjetas de stats arriba */}
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))", gap:12, marginBottom:14 }}>
+              <div style={{ ...glass, padding:"14px 16px" }}>
+                <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:4, letterSpacing:"0.5px" }}>UNIDADES TOTALES</div>
+                <div style={{ fontSize:"26px", fontWeight:800, color:"#005a9c" }}>{filteredInv.length}</div>
+              </div>
+              <div style={{ ...glass, padding:"14px 16px" }}>
+                <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:4, letterSpacing:"0.5px" }}>CONTROLES DISTINTOS</div>
+                <div style={{ fontSize:"26px", fontWeight:800, color:"#005a9c" }}>{chartRows.length}</div>
+              </div>
+              <div style={{ ...glass, padding:"14px 16px", background:"rgba(245,158,11,0.06)" }}>
+                <div style={{ fontSize:"10px", fontWeight:700, color:"#92400e", marginBottom:4, letterSpacing:"0.5px" }}>AUTONOMÍA PROMEDIO</div>
+                <div style={{ fontSize:"26px", fontWeight:800, color:"#92400e" }}>{ucha} días</div>
+                {controlesSinDuracion > 0 && <div style={{ fontSize:"11px", color:"#a16207", marginTop:2 }}>{controlesSinDuracion} sin días/u definidos</div>}
+              </div>
+              <div style={{ ...glass, padding:"14px 16px", background:"rgba(16,185,129,0.04)" }}>
+                <div style={{ fontSize:"10px", fontWeight:700, color:"#059669", marginBottom:4, letterSpacing:"0.5px" }}>SUMA AUTONOMÍA</div>
+                <div style={{ fontSize:"26px", fontWeight:800, color:"#059669" }}>{totalAutonomia} días</div>
+              </div>
+            </div>
+
+            {/* Filtros de sección (chips horizontales) */}
+            {sectionTree.length > 0 && (
+              <div style={{ ...glass, padding:"12px 14px", marginBottom:14, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                <span style={{ fontSize:"10px", fontWeight:800, color:"#94a3b8", letterSpacing:"0.6px", marginRight:4 }}>SECCIÓN:</span>
+                <button onClick={()=>{ setActiveSection(""); setActiveProduct(null); }}
+                  style={{ padding:"5px 12px", borderRadius:7, border:"none", background: !activeSection ? "#005a9c" : "rgba(0,0,0,0.04)", color: !activeSection ? "white" : "#64748b", cursor:"pointer", fontSize:"12px", fontWeight:700 }}>
+                  Todas <span style={{ opacity:0.7, marginLeft:4 }}>{inventory.length}</span>
+                </button>
+                {sectionTree.map(s => (
+                  <button key={s.nombre} onClick={()=>{ setActiveSection(s.nombre); setActiveProduct(null); }}
+                    style={{ padding:"5px 12px", borderRadius:7, border:"none", background: activeSection === s.nombre && !activeProduct ? "#005a9c" : "rgba(0,0,0,0.04)", color: activeSection === s.nombre && !activeProduct ? "white" : "#475569", cursor:"pointer", fontSize:"12px", fontWeight:700 }}>
+                    {s.nombre} <span style={{ opacity:0.7, marginLeft:4 }}>{s.count}</span>
+                  </button>
+                ))}
               </div>
             )}
 
+            {/* Sub-filtro: productos dentro de la sección activa */}
+            {activeSection && sectionTree.find(s => s.nombre === activeSection) && (
+              <div style={{ ...glass, padding:"10px 14px", marginBottom:14, display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                <span style={{ fontSize:"10px", fontWeight:800, color:"#94a3b8", letterSpacing:"0.6px", marginRight:4 }}>CONTROL:</span>
+                <button onClick={()=>setActiveProduct(null)}
+                  style={{ padding:"4px 10px", borderRadius:6, border:"none", background: !activeProduct ? "#005a9c" : "rgba(0,0,0,0.04)", color: !activeProduct ? "white" : "#64748b", cursor:"pointer", fontSize:"11px", fontWeight:700 }}>Todos</button>
+                {sectionTree.find(s => s.nombre === activeSection)!.productos.map(p => (
+                  <button key={p} onClick={()=>setActiveProduct(p)}
+                    style={{ padding:"4px 10px", borderRadius:6, border:"none", background: activeProduct === p ? "#005a9c" : "rgba(0,0,0,0.04)", color: activeProduct === p ? "white" : "#475569", cursor:"pointer", fontSize:"11px", fontWeight:600 }}>{p}</button>
+                ))}
+              </div>
+            )}
+
+            {/* Gráfico de barras: X = abreviatura, número de stock arriba de cada barra */}
+            {chartRows.length > 0 && (
+              <div style={{ ...glass, padding:"16px 20px", marginBottom:16 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
+                  <span style={{ fontSize:"12px", fontWeight:700, color:"#005a9c" }}>Stock por control — {activeSection || "Todas las secciones"}</span>
+                  <span style={{ fontSize:"11px", color:"#64748b" }}>Etiqueta = abreviatura del control</span>
+                </div>
+                <div style={{ height:240 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={chartRows} margin={{ top:24, right:10, left:-20, bottom:30 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(0,0,0,0.04)"/>
+                      <XAxis dataKey="abreviado" tick={{ fontSize:11, fill:"#1e293b", fontWeight:700 }} axisLine={false} tickLine={false} angle={-15} textAnchor="end" height={50}
+                        label={{ value: "Abreviatura del control", position: "insideBottom", offset: -5, style: { fontSize: 10, fill: "#64748b", fontWeight: 700 } }} />
+                      <YAxis tick={{ fontSize:10, fill:"#64748b" }} allowDecimals={false} axisLine={false} tickLine={false}/>
+                      <Tooltip
+                        cursor={{ fill:"rgba(0,0,0,0.02)" }}
+                        contentStyle={{ borderRadius:10, border:"none", boxShadow:"0 8px 20px rgba(0,0,0,0.1)", fontSize:13 }}
+                        formatter={(value: any, _name: any, props: any) => {
+                          if (props.dataKey === "stock") return [`${value} unidades`, props.payload.nombre];
+                          return [value, "Autonomía"];
+                        }}
+                        labelFormatter={(label, payload) => payload?.[0]?.payload?.nombre || label}
+                      />
+                      <Bar dataKey="stock" name="Unidades" fill="#005a9c" radius={[8,8,0,0]} barSize={42}>
+                        <LabelList dataKey="stock" position="top" style={{ fontSize: 12, fontWeight: 800, fill: "#005a9c" }} />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            {/* Tabla — ahora con columnas ABREV + AUTONOMÍA */}
             {groupedList.length === 0
-              ? <div style={{ ...glass, padding:60, textAlign:"center", color:"#94a3b8" }}><FlaskConical size={44} style={{ marginBottom:14, opacity:0.2 }}/><p style={{ fontWeight:700, fontSize:"15px", margin:0 }}>Sin stock{activeSection?` en ${activeSection}`:""}</p><p style={{ fontSize:"13px", margin:"8px 0 0" }}>Escanea un código de barras para comenzar</p></div>
+              ? <div style={{ ...glass, padding:60, textAlign:"center", color:"#94a3b8" }}>
+                  <FlaskConical size={44} style={{ marginBottom:14, opacity:0.2 }}/>
+                  <p style={{ fontWeight:700, fontSize:"15px", margin:0 }}>Sin stock{activeSection?` en ${activeSection}`:""}</p>
+                  <p style={{ fontSize:"13px", margin:"8px 0 0" }}>Escanea un código de barras para comenzar</p>
+                </div>
               : <div style={{ ...glass, overflow:"hidden" }}>
-                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"13px" }}>
-                    <thead><tr style={{ background:"rgba(0,90,156,0.05)" }}>{["NOMBRE","LOTE","VENCIMIENTO","CANT.","TEMP.","ESTADO","ACCIONES"].map((h,i)=><th key={h} style={{ padding:"12px 13px", fontWeight:800, color:"#005a9c", fontSize:"11px", letterSpacing:"0.5px", textAlign:i>=3?"center":"left", whiteSpace:"nowrap" }}>{h}</th>)}</tr></thead>
-                    <tbody>
-                      {groupedList.map(g => (
-                        <tr key={`${g.gtin}||${g.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
-                          <td style={{ padding:"12px 13px" }}><div style={{ fontWeight:700, color:"#1e293b" }}>{g.nombre}</div>{g.detalle&&<div style={{ fontSize:"11px", color:"#94a3b8", marginTop:2 }}>{g.detalle}</div>}</td>
-                          <td style={{ padding:"12px 13px", fontFamily:"'Roboto Mono',monospace", fontWeight:600, color:"#475569" }}>{g.lot}</td>
-                          <td style={{ padding:"12px 13px", fontWeight:600, color:"#334155", whiteSpace:"nowrap" }}>{formatExp(g.expiration)}</td>
-                          <td style={{ padding:"12px 13px", textAlign:"center" }}><span style={{ display:"inline-block", background:"rgba(0,90,156,0.1)", color:"#005a9c", fontWeight:900, fontSize:"16px", minWidth:36, padding:"3px 9px", borderRadius:8 }}>{g.cantidad}</span></td>
-                          <td style={{ padding:"12px 13px", textAlign:"center" }}><TempBadge temp={g.temperatura}/></td>
-                          <td style={{ padding:"12px 13px", textAlign:"center" }}><EstadoBadge estado={getEstado(g.expiration)}/></td>
-                          <td style={{ padding:"12px 13px", textAlign:"center" }}>
-                            <div style={{ display:"flex", gap:5, justifyContent:"center", flexWrap:"wrap" }}>
-                              {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); apiFetch(`/log-accion`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({usuario:currentUser!.nombre,accion:"VER PREPARACIÓN",detalles:`${g.nombre} | ${g.lot}`})}).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
-                              {isAdmin && <button onClick={()=>abrirEdicion(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
-                              {canConsumir && <button onClick={()=>consumirUnidad(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>− Consumir</button>}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"13px", minWidth:900 }}>
+                      <thead><tr style={{ background:"rgba(0,90,156,0.05)" }}>
+                        {["NOMBRE","ABREV","LOTE","VENC.","CANT.","AUTONOMÍA","TEMP.","ESTADO","ACCIONES"].map((h,i)=>
+                          <th key={h} style={{ padding:"12px 13px", fontWeight:800, color:"#005a9c", fontSize:"11px", letterSpacing:"0.5px", textAlign:i>=3?"center":"left", whiteSpace:"nowrap" }}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>
+                        {groupedList.map(g => {
+                          const dias = g.dias_uso_aprox ? g.cantidad * g.dias_uso_aprox : null;
+                          return (
+                          <tr key={`${g.gtin}||${g.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                            <td style={{ padding:"12px 13px" }}>
+                              <div style={{ fontWeight:700, color:"#1e293b" }}>{g.nombre}</div>
+                              {g.detalle && <div style={{ fontSize:"11px", color:"#94a3b8", marginTop:2 }}>{g.detalle}</div>}
+                            </td>
+                            <td style={{ padding:"12px 13px", fontFamily:"'Roboto Mono',monospace", fontWeight:800, color:"#005a9c", fontSize:"12px" }}>{g.abreviado || "—"}</td>
+                            <td style={{ padding:"12px 13px", fontFamily:"'Roboto Mono',monospace", fontWeight:600, color:"#475569" }}>{g.lot}</td>
+                            <td style={{ padding:"12px 13px", fontWeight:600, color:"#334155", whiteSpace:"nowrap" }}>{formatExp(g.expiration)}</td>
+                            <td style={{ padding:"12px 13px", textAlign:"center" }}>
+                              <span style={{ display:"inline-block", background:"rgba(0,90,156,0.1)", color:"#005a9c", fontWeight:900, fontSize:"16px", minWidth:36, padding:"3px 9px", borderRadius:8 }}>{g.cantidad}</span>
+                            </td>
+                            <td style={{ padding:"12px 13px", textAlign:"center" }}>
+                              {dias !== null
+                                ? <span style={{ display:"inline-block", background:"rgba(245,158,11,0.12)", color:"#92400e", fontWeight:800, fontSize:"12px", padding:"4px 10px", borderRadius:7, whiteSpace:"nowrap" }}>{dias} días</span>
+                                : <span style={{ color:"#cbd5e1", fontSize:"11px" }}>—</span>}
+                            </td>
+                            <td style={{ padding:"12px 13px", textAlign:"center" }}><TempBadge temp={g.temperatura}/></td>
+                            <td style={{ padding:"12px 13px", textAlign:"center" }}><EstadoBadge estado={getEstado(g.expiration)}/></td>
+                            <td style={{ padding:"12px 13px", textAlign:"center" }}>
+                              <div style={{ display:"flex", gap:5, justifyContent:"center", flexWrap:"wrap" }}>
+                                {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); apiFetch(`/log-accion`, { method:"POST", body: JSON.stringify({ accion:"VER PREPARACIÓN", detalles:`${g.nombre} | ${g.lot}` }) }).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
+                                {isAdmin && <button onClick={()=>abrirEdicion(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
+                                {canConsumir && <button onClick={()=>consumirUnidad(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>− Consumir</button>}
+                              </div>
+                            </td>
+                          </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
             }
           </>
-        )}
+          );
+        })()}
 
         {/* ─── ANEXOS TELEFÓNICOS ───────────────────────────────────────────── */}
         {view === "Anexos" && (
@@ -1319,7 +1443,13 @@ export default function InventoryApp() {
                       />
                       <datalist id="prod-name-list">{productNames.map(n => <option key={n} value={n}/>)}</datalist>
                     </div>
-                    <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={form.detalle} onChange={e=>setForm(f=>({...f,detalle:e.target.value}))} placeholder="[cantidad] x [ml]" style={inp}/></div>
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                      <div>
+                        <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>ABREVIADO *</div>
+                        <input value={form.abreviado} onChange={e=>setForm(f=>({...f,abreviado:e.target.value}))} placeholder="ej: LqH, Trilv-CBC" style={{ ...inp, fontFamily:"'Roboto Mono',monospace", textTransform:"uppercase" }}/>
+                      </div>
+                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={form.detalle} onChange={e=>setForm(f=>({...f,detalle:e.target.value}))} placeholder="[cantidad] x [ml]" style={inp}/></div>
+                    </div>
 
                     {/* ─── PREPARACIÓN ESTRUCTURADA (8 campos) ─── */}
                     <div style={{ background:"rgba(0,90,156,0.04)", border:"1px solid rgba(0,90,156,0.12)", borderRadius:10, padding:14, marginTop:4 }}>
@@ -1423,6 +1553,17 @@ export default function InventoryApp() {
                         </div>
                       </div>
 
+                      {/* Autonomía: días promedio que rinde una unidad en uso normal */}
+                      <div style={{ marginTop:10, padding:"10px 12px", background:"rgba(245,158,11,0.06)", border:"1px solid rgba(245,158,11,0.18)", borderRadius:8 }}>
+                        <div style={{ fontSize:"10px", fontWeight:700, color:"#92400e", marginBottom:3 }}>AUTONOMÍA — DÍAS POR UNIDAD *</div>
+                        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                          <input type="number" min="1" placeholder="ej: 7" value={form.dias_uso_aprox ?? ""}
+                            onChange={e=>setForm(f=>({ ...f, dias_uso_aprox: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0 }))}
+                            style={{ ...inp, maxWidth:120 }}/>
+                          <span style={{ fontSize:"11px", color:"#92400e" }}>días que rinde una caja/unidad en uso normal — se usa para calcular autonomía total del stock</span>
+                        </div>
+                      </div>
+
                       {/* Notas libres opcionales */}
                       <div style={{ marginTop:10 }}>
                         <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOTAS ADICIONALES (opcional)</div>
@@ -1449,13 +1590,19 @@ export default function InventoryApp() {
             <div style={{ display:"grid", gap:11 }}>
               <div style={{ padding:14, background:"rgba(0,90,156,0.03)", borderRadius:10, display:"grid", gap:10 }}>
                 <div style={{ fontSize:"10px", fontWeight:800, color:"#005a9c" }}>DATOS DEL CONTROL</div>
-                <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE</div><input value={editForm.nombre} onChange={e=>setEditForm(f=>({...f,nombre:e.target.value}))} style={inp}/></div>
+                <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:10 }}>
+                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE</div><input value={editForm.nombre} onChange={e=>setEditForm(f=>({...f,nombre:e.target.value}))} style={inp}/></div>
+                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>ABREV.</div><input value={editForm.abreviado} onChange={e=>setEditForm(f=>({...f,abreviado:e.target.value}))} placeholder="ej: LqH" style={{ ...inp, fontFamily:"'Roboto Mono',monospace", textTransform:"uppercase" }}/></div>
+                </div>
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
                   <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>SECCIÓN</div><input list="sec-edit" value={editForm.seccion} onChange={e=>setEditForm(f=>({...f,seccion:e.target.value}))} style={inp}/><datalist id="sec-edit">{secciones.map(s=><option key={s.nombre} value={s.nombre}/>)}</datalist></div>
-                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>TEMPERATURA</div><select value={editForm.temperatura} onChange={e=>setEditForm(f=>({...f,temperatura:e.target.value}))} style={inp}><option>Refrigerado</option><option>Congelado</option><option>Ambiente</option></select></div>
+                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>ALMACEN. SIN ABRIR</div><select value={editForm.almacenamiento_sin_abrir || editForm.temperatura} onChange={e=>setEditForm(f=>({...f,almacenamiento_sin_abrir:e.target.value as any, temperatura:e.target.value}))} style={inp}><option value="">— Seleccionar —</option><option>Refrigerado</option><option>Congelado</option><option>Ambiente</option></select></div>
                 </div>
-                <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={editForm.detalle} onChange={e=>setEditForm(f=>({...f,detalle:e.target.value}))} style={inp}/></div>
-                <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>PREPARACIÓN</div><textarea value={editForm.preparacion} onChange={e=>setEditForm(f=>({...f,preparacion:e.target.value}))} rows={3} style={{ ...inp, resize:"vertical", lineHeight:1.5 }}/></div>
+                <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:10 }}>
+                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={editForm.detalle} onChange={e=>setEditForm(f=>({...f,detalle:e.target.value}))} style={inp}/></div>
+                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>AUTONOMÍA (días/u)</div><input type="number" min="0" value={editForm.dias_uso_aprox ?? ""} onChange={e=>setEditForm(f=>({...f,dias_uso_aprox: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0}))} style={inp}/></div>
+                </div>
+                <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOTAS DE PREPARACIÓN</div><textarea value={editForm.preparacion} onChange={e=>setEditForm(f=>({...f,preparacion:e.target.value}))} rows={3} style={{ ...inp, resize:"vertical", lineHeight:1.5 }}/></div>
               </div>
               <div style={{ padding:14, background:"rgba(217,119,6,0.03)", border:"1px solid rgba(217,119,6,0.12)", borderRadius:10, display:"grid", gap:10 }}>
                 <div style={{ fontSize:"10px", fontWeight:800, color:"#d97706" }}>CORRECCIÓN DE LOTE / VENCIMIENTO</div>

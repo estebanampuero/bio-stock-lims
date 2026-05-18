@@ -281,37 +281,47 @@ async function runMigrations(db) {
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_maestro_baja  ON maestro_productos(fecha_baja)`);
     await db.exec("PRAGMA user_version = 13"); v = 13;
   }
+  // v14: Abreviatura del control + días de autonomía por unidad
+  if (v < 14) {
+    await db.exec(`ALTER TABLE maestro_productos ADD COLUMN abreviado TEXT`);
+    await db.exec(`ALTER TABLE maestro_productos ADD COLUMN dias_uso_aprox INTEGER`);
+    await db.exec("PRAGMA user_version = 14"); v = 14;
+  }
 }
 
-// ── Rotación del PIN admin por defecto al primer arranque post-install ──────
+// ── PIN admin por defecto: 1234 con must_change_pin obligatorio ─────────────
+// Para activar rotación a PIN aleatorio en producción: set AUTO_ROTATE_DEFAULT_PIN=1
 async function rotateDefaultAdminPin() {
+  if (process.env.AUTO_ROTATE_DEFAULT_PIN !== "1") {
+    // Modo dev/default: garantizar que admin tenga 1234 + must_change_pin=1
+    const admin = await db.get("SELECT id, pin FROM usuarios WHERE nombre = 'admin'");
+    if (!admin) return;
+    await db.run("UPDATE usuarios SET must_change_pin = 1 WHERE id = ?", [admin.id]);
+    console.log(`🔓 Modo dev: admin/1234 (debe cambiar PIN al primer login)`);
+    return;
+  }
+  // Modo producción: rotar a PIN aleatorio si todavía es 1234
   const admin = await db.get("SELECT id, pin FROM usuarios WHERE nombre = 'admin'");
   if (!admin) return;
   const isDefault = await bcrypt.compare("1234", admin.pin).catch(() => false);
   if (!isDefault) return;
-
-  const newPin = crypto.randomInt(10000000, 99999999).toString(); // 8 dígitos
+  const newPin = crypto.randomInt(10000000, 99999999).toString();
   const hash = await bcrypt.hash(newPin, 10);
   await db.run("UPDATE usuarios SET pin = ?, must_change_pin = 1 WHERE id = ?", [hash, admin.id]);
-
   const pinFile = path.join(BASE_DIR, "INITIAL_PIN.txt");
-  const content =
+  fs.writeFileSync(pinFile,
 `BIO-STOCK LIMS — PIN Inicial del Administrador
 ================================================
 
 Usuario:  admin
 PIN:      ${newPin}
 
-INSTRUCCIONES PARA IT DEL HOSPITAL:
-
-1. Entregar este PIN al quimico responsable del laboratorio.
-2. En el primer login, el sistema le forzara a cambiar el PIN.
-3. Una vez confirmado el cambio, ELIMINAR este archivo.
+Entregar al quimico responsable. Al primer login se forzara el cambio.
+Una vez confirmado, ELIMINAR este archivo.
 
 Generado: ${new Date().toISOString()}
-`;
-  try { fs.writeFileSync(pinFile, content, { mode: 0o600 }); } catch (_) {}
-  console.log(`🔐 PIN admin default rotado. Nuevo PIN escrito en: ${pinFile}`);
+`, { mode: 0o600 });
+  console.log(`🔐 PIN admin default rotado: ${pinFile}`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -453,10 +463,10 @@ const canInv = authorize("ADMIN", "TECNOLOGO");
 v1.get("/inventario", authenticate, async (req, res) => {
   try {
     const rows = await db.all(`SELECT i.*,
-        m.nombre, m.detalle, m.pack, m.seccion, m.temperatura, m.preparacion,
+        m.nombre, m.abreviado, m.detalle, m.pack, m.seccion, m.temperatura, m.preparacion,
         m.almacenamiento_sin_abrir, m.descongelar_min, m.reconstituir,
         m.tiempo_reconstitucion_min, m.temperatura_post_reconstitucion,
-        m.duracion_dias, m.cantidad_alicuotas, m.volumen_ul
+        m.duracion_dias, m.cantidad_alicuotas, m.volumen_ul, m.dias_uso_aprox
       FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
       WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')
       ORDER BY i.expiration ASC`);
@@ -713,26 +723,27 @@ v1.get("/maestro/by-name", authenticate, async (req, res) => {
 v1.post("/producto", authenticate, canInv, async (req, res) => {
   try {
     const {
-      gtin, nombre, detalle, pack, seccion, temperatura, preparacion,
+      gtin, nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
       almacenamiento_sin_abrir, descongelar_min, reconstituir,
       tiempo_reconstitucion_min, temperatura_post_reconstitucion,
-      duracion_dias, cantidad_alicuotas, volumen_ul,
+      duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox,
     } = req.body;
     if (!gtin || !nombre || !seccion) return res.status(400).json({ success: false, message: "GTIN, nombre y sección obligatorios" });
     await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
     const storage = almacenamiento_sin_abrir || temperatura || "Refrigerado";
     await db.run(
       `INSERT OR REPLACE INTO maestro_productos (
-        gtin, nombre, detalle, pack, seccion, temperatura, preparacion,
+        gtin, nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
         almacenamiento_sin_abrir, descongelar_min, reconstituir,
         tiempo_reconstitucion_min, temperatura_post_reconstitucion,
-        duracion_dias, cantidad_alicuotas, volumen_ul, fecha_baja
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, fecha_baja
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       [
-        gtin, nombre, detalle || "", pack || "", seccion, storage, preparacion || "",
+        gtin, nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
         storage, descongelar_min ?? null, reconstituir || "No",
         tiempo_reconstitucion_min ?? null, temperatura_post_reconstitucion || null,
         duracion_dias ?? null, cantidad_alicuotas ?? null, volumen_ul ?? null,
+        dias_uso_aprox ?? null,
       ]
     );
     await registrarLog(req.user.nombre, "NUEVO MAESTRO", `${nombre} → ${seccion} | GTIN: ${gtin}`, getIP(req));
@@ -743,25 +754,26 @@ v1.post("/producto", authenticate, canInv, async (req, res) => {
 v1.put("/producto/:gtin", authenticate, canInv, async (req, res) => {
   try {
     const {
-      nombre, detalle, pack, seccion, temperatura, preparacion,
+      nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
       almacenamiento_sin_abrir, descongelar_min, reconstituir,
       tiempo_reconstitucion_min, temperatura_post_reconstitucion,
-      duracion_dias, cantidad_alicuotas, volumen_ul,
+      duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox,
     } = req.body;
     await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
     const storage = almacenamiento_sin_abrir || temperatura || "Refrigerado";
     await db.run(
       `UPDATE maestro_productos SET
-        nombre=?, detalle=?, pack=?, seccion=?, temperatura=?, preparacion=?,
+        nombre=?, abreviado=?, detalle=?, pack=?, seccion=?, temperatura=?, preparacion=?,
         almacenamiento_sin_abrir=?, descongelar_min=?, reconstituir=?,
         tiempo_reconstitucion_min=?, temperatura_post_reconstitucion=?,
-        duracion_dias=?, cantidad_alicuotas=?, volumen_ul=?
+        duracion_dias=?, cantidad_alicuotas=?, volumen_ul=?, dias_uso_aprox=?
         WHERE gtin=?`,
       [
-        nombre, detalle || "", pack || "", seccion, storage, preparacion || "",
+        nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
         storage, descongelar_min ?? null, reconstituir || "No",
         tiempo_reconstitucion_min ?? null, temperatura_post_reconstitucion || null,
         duracion_dias ?? null, cantidad_alicuotas ?? null, volumen_ul ?? null,
+        dias_uso_aprox ?? null,
         req.params.gtin,
       ]
     );
