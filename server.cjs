@@ -40,12 +40,8 @@ function findOrCreate(name, generator) {
 }
 
 const DB_PATH      = process.env.DB_PATH || path.join(BASE_DIR, "inventario_biorad.db");
-const MASTER_KEY_F = process.env.MASTER_KEY || findOrCreate("master.key", () => crypto.randomBytes(32));
 const JWT_SECRET_F = process.env.JWT_SECRET_FILE || findOrCreate("jwt.secret", () => crypto.randomBytes(48).toString("hex"));
 const PORT         = parseInt(process.env.PORT || "3000", 10);
-
-const MASTER_KEY = fs.readFileSync(MASTER_KEY_F);
-if (MASTER_KEY.length !== 32) { console.error("⚠ master.key debe ser exactamente 32 bytes"); process.exit(1); }
 
 const JWT_SECRET = fs.readFileSync(JWT_SECRET_F, "utf8").trim();
 const JWT_TTL = "8h";
@@ -55,24 +51,15 @@ const TLS_CERT_PATH = process.env.TLS_CERT || path.join(BASE_DIR, "cert.pem");
 const TLS_KEY_PATH  = process.env.TLS_KEY  || path.join(BASE_DIR, "key.pem");
 const TLS_ENABLED = fs.existsSync(TLS_CERT_PATH) && fs.existsSync(TLS_KEY_PATH);
 
-// ── Crypto helpers (AES-256-GCM) ─────────────────────────────────────────────
-function encPII(plain) {
-  if (plain === null || plain === undefined || plain === "") return "";
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", MASTER_KEY, iv);
-  const enc = Buffer.concat([cipher.update(String(plain), "utf8"), cipher.final()]);
-  return `enc:v1:${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${enc.toString("hex")}`;
-}
-function decPII(stored) {
-  if (!stored) return "";
-  if (typeof stored !== "string" || !stored.startsWith("enc:v1:")) return stored;
-  const parts = stored.split(":");
-  if (parts.length !== 5) return "";
-  try {
-    const decipher = crypto.createDecipheriv("aes-256-gcm", MASTER_KEY, Buffer.from(parts[2], "hex"));
-    decipher.setAuthTag(Buffer.from(parts[3], "hex"));
-    return Buffer.concat([decipher.update(Buffer.from(parts[4], "hex")), decipher.final()]).toString("utf8");
-  } catch (_) { return ""; }
+// Sin TLS, las credenciales (usuario/clave) viajan en texto plano por la LAN.
+// REQUIRE_TLS=1 aborta el arranque si no hay certificados. El instalador Windows
+// (Install-BioStock.ps1 -EnableTLS) genera cert.pem/key.pem y setea esta env.
+const REQUIRE_TLS = process.env.REQUIRE_TLS === "1";
+if (REQUIRE_TLS && !TLS_ENABLED) {
+  console.error("⛔ REQUIRE_TLS=1 pero no se encontraron cert.pem/key.pem.");
+  console.error("   Abortando: las credenciales no pueden transmitirse sin TLS.");
+  console.error("   Genera los certificados con: scripts/Install-BioStock.ps1 -EnableTLS");
+  process.exit(1);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -81,7 +68,20 @@ function decPII(stored) {
 
 const app = express();
 app.disable("x-powered-by");
-app.use(cors());
+
+// CORS: la SPA se sirve same-origin desde este mismo Express, por lo que el
+// navegador no aplica CORS a las peticiones reales del sistema. Solo restringimos
+// orígenes CROSS-origin (un sitio malicioso intentando usar un token robado).
+// Same-origin / curl / health-checks no mandan header Origin → se permiten.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:1420,http://localhost:3000")
+  .split(",").map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);                     // same-origin / curl / health
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(null, false);                                 // cross-origin no listado: sin headers CORS
+  },
+}));
 app.use(express.json({ limit: "1mb" }));
 
 const distPath = path.join(__dirname, "dist");
@@ -104,16 +104,27 @@ function errRes(res, e, msg = "Error interno del servidor") {
   res.status(500).json({ success: false, message: msg });
 }
 
+// Rutas permitidas mientras el usuario aún debe cambiar su PIN inicial.
+const PIN_CHANGE_ALLOWED = new Set(["/me", "/cambiar-pin", "/logout"]);
+
 function authenticate(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return res.status(401).json({ success: false, message: "Token requerido" });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
-    next();
   } catch (_) {
     return res.status(401).json({ success: false, message: "Token inválido o expirado" });
   }
+  // Enforcement server-side del cambio de PIN obligatorio: con el PIN default no se
+  // puede operar la API directamente, solo cambiar el PIN. (No basta el modal del cliente.)
+  if (req.user.mustChangePin) {
+    const rel = req.path.startsWith("/api/v1") ? req.path.slice(7) : req.path;
+    if (!PIN_CHANGE_ALLOWED.has(rel)) {
+      return res.status(403).json({ success: false, message: "Debe cambiar su PIN inicial antes de continuar", mustChangePin: true });
+    }
+  }
+  next();
 }
 
 function authorize(...rolesPermitidos) {
@@ -165,10 +176,6 @@ async function isLocked(nombre) {
   } catch (_) { return false; }
 }
 
-// ── PII access log con throttle (max 1 row/min/user/tabla) ──────────────────
-const recentPIIAccess = new Map(); // key → timestamp
-const PII_LOG_THROTTLE_MS = 60_000;
-
 // ════════════════════════════════════════════════════════════════════════════
 // MIGRATIONS
 // ════════════════════════════════════════════════════════════════════════════
@@ -199,7 +206,6 @@ async function runMigrations(db) {
   if (v < 5) {
     await db.exec(`ALTER TABLE logs ADD COLUMN perfil TEXT DEFAULT ''`);
     await db.exec(`CREATE TABLE IF NOT EXISTS anexos (id TEXT PRIMARY KEY, servicio TEXT NOT NULL, salas TEXT, numero TEXT NOT NULL, creado_por TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
-    await db.exec(`CREATE TABLE IF NOT EXISTS diuresis (id TEXT PRIMARY KEY, num_peticion TEXT NOT NULL, rut_paciente TEXT, nombre_paciente TEXT, diuresis_ml TEXT, peso TEXT, talla TEXT, baja_motivo TEXT NOT NULL, obs_rechazo TEXT, motivo_vih TEXT, usuario TEXT NOT NULL, fecha TEXT NOT NULL, archivado INTEGER DEFAULT 0, archivado_at TEXT)`);
     await db.exec("PRAGMA user_version = 5"); v = 5;
   }
   if (v < 6) {
@@ -207,7 +213,6 @@ async function runMigrations(db) {
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_inv_expiration ON inventario(expiration)`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_inv_baja       ON inventario(fecha_baja)`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_fecha     ON logs(fecha)`);
-    await db.exec(`CREATE INDEX IF NOT EXISTS idx_diuresis_fecha ON diuresis(fecha)`);
     await db.exec("PRAGMA user_version = 6"); v = 6;
   }
   if (v < 7) {
@@ -228,21 +233,10 @@ async function runMigrations(db) {
     await db.run("UPDATE usuarios SET must_change_pin = 1 WHERE nombre = 'admin' AND pin LIKE '$2%'");
     await db.exec("PRAGMA user_version = 8"); v = 8;
   }
-  if (v < 9) {
-    const rows = await db.all("SELECT id, rut_paciente, nombre_paciente FROM diuresis");
-    for (const r of rows) {
-      const rutEnc    = r.rut_paciente    && !r.rut_paciente.startsWith("enc:v1:")    ? encPII(r.rut_paciente)    : r.rut_paciente;
-      const nombreEnc = r.nombre_paciente && !r.nombre_paciente.startsWith("enc:v1:") ? encPII(r.nombre_paciente) : r.nombre_paciente;
-      if (rutEnc !== r.rut_paciente || nombreEnc !== r.nombre_paciente) {
-        await db.run("UPDATE diuresis SET rut_paciente = ?, nombre_paciente = ? WHERE id = ?", [rutEnc, nombreEnc, r.id]);
-      }
-    }
-    await db.exec("PRAGMA user_version = 9"); v = 9;
-  }
-  if (v < 10) {
-    await db.exec(`CREATE TABLE IF NOT EXISTS pii_access_log (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario TEXT NOT NULL, perfil TEXT, tabla TEXT NOT NULL, filtro TEXT, rows_devueltos INTEGER, fecha TEXT NOT NULL, ip TEXT)`);
-    await db.exec("PRAGMA user_version = 10"); v = 10;
-  }
+  // v9, v10: (obsoletas) — cifrado de PII y pii_access_log del módulo diuresis,
+  // eliminado. Se mantienen como saltos de versión para no romper la secuencia.
+  if (v < 9)  { await db.exec("PRAGMA user_version = 9");  v = 9; }
+  if (v < 10) { await db.exec("PRAGMA user_version = 10"); v = 10; }
   if (v < 11) {
     await db.exec(`CREATE TABLE IF NOT EXISTS login_lockouts (
       nombre TEXT PRIMARY KEY,
@@ -270,13 +264,11 @@ async function runMigrations(db) {
   if (v < 13) {
     await db.exec(`ALTER TABLE protocolos ADD COLUMN fecha_baja TEXT DEFAULT NULL`);
     await db.exec(`ALTER TABLE anexos ADD COLUMN fecha_baja TEXT DEFAULT NULL`);
-    await db.exec(`ALTER TABLE diuresis ADD COLUMN fecha_baja TEXT DEFAULT NULL`);
     await db.exec(`ALTER TABLE usuarios ADD COLUMN fecha_baja TEXT DEFAULT NULL`);
     await db.exec(`ALTER TABLE maestro_productos ADD COLUMN fecha_baja TEXT DEFAULT NULL`);
     // Índices para queries que filtran por fecha_baja
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_proto_baja    ON protocolos(fecha_baja)`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_anexos_baja   ON anexos(fecha_baja)`);
-    await db.exec(`CREATE INDEX IF NOT EXISTS idx_diuresis_baja ON diuresis(fecha_baja)`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_users_baja    ON usuarios(fecha_baja)`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_maestro_baja  ON maestro_productos(fecha_baja)`);
     await db.exec("PRAGMA user_version = 13"); v = 13;
@@ -286,6 +278,12 @@ async function runMigrations(db) {
     await db.exec(`ALTER TABLE maestro_productos ADD COLUMN abreviado TEXT`);
     await db.exec(`ALTER TABLE maestro_productos ADD COLUMN dias_uso_aprox INTEGER`);
     await db.exec("PRAGMA user_version = 14"); v = 14;
+  }
+  // v15: Eliminado el módulo de diuresis / bajas de toma de muestra y su PII.
+  if (v < 15) {
+    await db.exec(`DROP TABLE IF EXISTS diuresis`);
+    await db.exec(`DROP TABLE IF EXISTS pii_access_log`);
+    await db.exec("PRAGMA user_version = 15"); v = 15;
   }
 }
 
@@ -337,19 +335,6 @@ async function registrarLog(usuario, accion, detalles, ip = "desconocida") {
   } catch (_) {}
 }
 
-async function registrarAccesoPII(req, tabla, filtro, rowsDevueltos) {
-  try {
-    const usuario = req.user?.nombre || "?";
-    const key = `${usuario}:${tabla}`;
-    const now = Date.now();
-    const last = recentPIIAccess.get(key) || 0;
-    if (now - last < PII_LOG_THROTTLE_MS) return;
-    recentPIIAccess.set(key, now);
-    await db.run("INSERT INTO pii_access_log (usuario, perfil, tabla, filtro, rows_devueltos, fecha, ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [usuario, req.user?.rol || "?", tabla, filtro, rowsDevueltos, new Date().toISOString(), getIP(req)]);
-  } catch (_) {}
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // BACKUP AUTOMÁTICO DIARIO (02:00 + uno al arranque si > 24h sin backup)
 // ════════════════════════════════════════════════════════════════════════════
@@ -372,8 +357,20 @@ async function ejecutarBackupDB() {
   try {
     // VACUUM INTO crea una copia consistente sin bloquear writers
     await db.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
-    // Verificación rápida de integridad
-    const verify = await db.get(`SELECT 1`);  // si la DB original está OK ya es suficiente
+    // Verificación real de integridad: abrir el ARCHIVO DESTINO y correr integrity_check.
+    const integrity = await new Promise((resolve) => {
+      const vdb = new sqlite3.Database(dest, sqlite3.OPEN_READONLY, (err) => {
+        if (err) return resolve("error: " + err.message);
+        vdb.get("PRAGMA integrity_check", (e, row) => {
+          vdb.close();
+          resolve(e ? "error: " + e.message : (row && row.integrity_check));
+        });
+      });
+    });
+    if (integrity !== "ok") {
+      try { fs.unlinkSync(dest); } catch (_) {}
+      throw new Error(`integrity_check del backup falló: ${integrity}`);
+    }
     const sz = fs.statSync(dest).size;
     console.log(`💾 Backup creado: ${dest} (${(sz/1024).toFixed(1)} KB)`);
 
@@ -421,26 +418,6 @@ async function backupAlArranqueSiHaceFalta() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ARCHIVO DIURESIS 23:00
-// ════════════════════════════════════════════════════════════════════════════
-
-function programarArchivoDiuresis() {
-  const ahora = new Date();
-  const objetivo = new Date();
-  objetivo.setHours(23, 0, 0, 0);
-  if (ahora >= objetivo) objetivo.setDate(objetivo.getDate() + 1);
-  setTimeout(async () => {
-    try {
-      const hoy = new Date().toISOString().split("T")[0];
-      const res = await db.run("UPDATE diuresis SET archivado = 1, archivado_at = ? WHERE DATE(fecha, 'localtime') = ? AND archivado = 0",
-        [new Date().toISOString(), hoy]);
-      console.log(`✅ Diuresis archivada — ${hoy} (${res.changes})`);
-    } catch (e) { console.error("Archivo diuresis:", e.message); }
-    programarArchivoDiuresis();
-  }, objetivo - ahora);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -454,7 +431,6 @@ function programarArchivoDiuresis() {
   await runMigrations(db);
   await rotateDefaultAdminPin();
   console.log(`✅ BIO-STOCK API lista. DB: ${DB_PATH}`);
-  programarArchivoDiuresis();
   await backupAlArranqueSiHaceFalta();
   programarBackupDiario();
 })().catch(e => { console.error("Init fallido:", e); process.exit(1); });
@@ -466,6 +442,14 @@ function programarArchivoDiuresis() {
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: "Demasiados intentos. Espere 15 minutos." },
+});
+
+// Limiter global de la API: holgado para tolerar el polling de inventario (cada 3s = ~20/min
+// por cliente) pero suficiente para frenar scraping de PII o abuso. Por IP (cada PC de la LAN
+// tiene su propia IP).
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 600, standardHeaders: true, legacyHeaders: false,
+  message: { success: false, message: "Demasiadas solicitudes. Reduzca la frecuencia." },
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -491,7 +475,7 @@ v1.post("/login", loginLimiter, async (req, res) => {
     await registerLoginAttempt(nombre, !!valid);
 
     if (valid) {
-      const token = jwt.sign({ sub: user.id, nombre: user.nombre, rol: user.rol }, JWT_SECRET, { expiresIn: JWT_TTL });
+      const token = jwt.sign({ sub: user.id, nombre: user.nombre, rol: user.rol, mustChangePin: !!user.must_change_pin }, JWT_SECRET, { expiresIn: JWT_TTL });
       await registrarLog(user.nombre, "LOGIN", `Sesión iniciada — rol: ${user.rol}`, ip);
       res.json({ success: true, token, user: { id: user.id, nombre: user.nombre, rol: user.rol, must_change_pin: !!user.must_change_pin } });
     } else {
@@ -525,7 +509,9 @@ v1.post("/cambiar-pin", authenticate, async (req, res) => {
     const hash = await bcrypt.hash(pinNuevo, 10);
     await db.run("UPDATE usuarios SET pin = ?, must_change_pin = 0 WHERE id = ?", [hash, req.user.sub]);
     await registrarLog(req.user.nombre, "CAMBIO PIN", "PIN actualizado", getIP(req));
-    res.json({ success: true });
+    // Token fresco sin el flag mustChangePin para que el usuario pueda operar sin re-login.
+    const token = jwt.sign({ sub: req.user.sub, nombre: req.user.nombre, rol: req.user.rol, mustChangePin: false }, JWT_SECRET, { expiresIn: JWT_TTL });
+    res.json({ success: true, token });
   } catch (e) { errRes(res, e); }
 });
 
@@ -683,81 +669,6 @@ v1.delete("/anexos/:id", authenticate, authorize("ADMIN"), async (req, res) => {
   } catch (e) { errRes(res, e); }
 });
 
-// ── DIURESIS ────────────────────────────────────────────────────────────────
-function diuresisToClient(r) {
-  return { ...r, rut_paciente: decPII(r.rut_paciente), nombre_paciente: decPII(r.nombre_paciente) };
-}
-
-v1.get("/diuresis/hoy", authenticate, async (req, res) => {
-  try {
-    const rows = await db.all("SELECT * FROM diuresis WHERE fecha_baja IS NULL AND DATE(fecha, 'localtime') = DATE('now', 'localtime') ORDER BY fecha DESC");
-    const out = rows.map(diuresisToClient);
-    await registrarAccesoPII(req, "diuresis", "hoy", out.length); // throttled internamente
-    res.json(out);
-  } catch (e) { errRes(res, e); }
-});
-
-v1.get("/diuresis/historico", authenticate, authorize("ADMIN", "TECNOLOGO"), async (req, res) => {
-  try {
-    const { fecha, peticion, nombre, cursor } = req.query;
-    const LIMIT = 200;
-    let q = "SELECT * FROM diuresis WHERE fecha_baja IS NULL"; const params = [];
-    if (fecha)    { q += " AND DATE(fecha, 'localtime') = ?"; params.push(fecha); }
-    if (peticion) { q += " AND num_peticion LIKE ?";          params.push(`%${peticion}%`); }
-    if (cursor)   { q += " AND fecha < ?";                    params.push(cursor); }
-    q += " ORDER BY fecha DESC LIMIT ?"; params.push(LIMIT + 1);
-    let rows = await db.all(q, params);
-    let hasMore = false;
-    if (rows.length > LIMIT) { rows = rows.slice(0, LIMIT); hasMore = true; }
-    let out = rows.map(diuresisToClient);
-    if (nombre) {
-      const t = String(nombre).toLowerCase();
-      out = out.filter(r => (r.nombre_paciente || "").toLowerCase().includes(t));
-    }
-    await registrarAccesoPII(req, "diuresis", `historico:${JSON.stringify({fecha,peticion,nombre})}`, out.length);
-    res.json({ rows: out, nextCursor: hasMore ? rows[rows.length - 1].fecha : null });
-  } catch (e) { errRes(res, e); }
-});
-
-// Detección de anomalías — z-score de diuresis_ml por petición histórica
-v1.get("/diuresis/stats/:num_peticion", authenticate, async (req, res) => {
-  try {
-    const rows = await db.all(
-      "SELECT diuresis_ml, fecha FROM diuresis WHERE num_peticion = ? AND diuresis_ml IS NOT NULL AND diuresis_ml != '' ORDER BY fecha DESC LIMIT 30",
-      [req.params.num_peticion]
-    );
-    const vals = rows.map(r => parseFloat(r.diuresis_ml)).filter(n => !isNaN(n));
-    if (vals.length < 3) return res.json({ n: vals.length, mean: null, std: null, lastValue: vals[0] ?? null });
-    const mean = vals.reduce((a,b) => a+b, 0) / vals.length;
-    const variance = vals.reduce((a,b) => a + (b-mean)**2, 0) / vals.length;
-    const std = Math.sqrt(variance);
-    res.json({ n: vals.length, mean: Math.round(mean), std: Math.round(std), lastValue: vals[0], lastDate: rows[0].fecha });
-  } catch (e) { errRes(res, e); }
-});
-
-v1.post("/diuresis", authenticate, authorize("ADMIN", "TOMA_MUESTRA"), async (req, res) => {
-  try {
-    const { num_peticion, rut_paciente, nombre_paciente, diuresis_ml, peso, talla, baja_motivo, obs_rechazo, motivo_vih } = req.body;
-    if (!num_peticion || !baja_motivo) return res.status(400).json({ success: false, message: "Petición y motivo de baja obligatorios" });
-    const id = randomUUID(); const now = new Date().toISOString();
-    await db.run(`INSERT INTO diuresis (id, num_peticion, rut_paciente, nombre_paciente, diuresis_ml, peso, talla, baja_motivo, obs_rechazo, motivo_vih, usuario, fecha)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, num_peticion, encPII(rut_paciente), encPII(nombre_paciente), diuresis_ml || "", peso || "", talla || "", baja_motivo, obs_rechazo || "", motivo_vih || "", req.user.nombre, now]);
-    await registrarLog(req.user.nombre, "INGRESO DIURESIS", `Petición: ${num_peticion}`, getIP(req));
-    res.json({ success: true, id });
-  } catch (e) { errRes(res, e); }
-});
-
-v1.delete("/diuresis/:id", authenticate, authorize("ADMIN"), async (req, res) => {
-  try {
-    const d = await db.get("SELECT num_peticion FROM diuresis WHERE id = ?", [req.params.id]);
-    if (!d) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run("UPDATE diuresis SET fecha_baja = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
-    await registrarLog(req.user.nombre, "ELIMINAR DIURESIS (SOFT)", `Petición: ${d.num_peticion}`, getIP(req));
-    res.json({ success: true });
-  } catch (e) { errRes(res, e); }
-});
-
 // ── MAESTRO ────────────────────────────────────────────────────────────────
 v1.get("/producto/:gtin", authenticate, async (req, res) => {
   try {
@@ -902,7 +813,7 @@ v1.post("/usuarios", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
     const { nombre, rol, pin } = req.body;
     if (!nombre || !rol || !pin) return res.status(400).json({ success: false, message: "Faltan campos" });
-    const rolesValidos = ["ADMIN", "TECNOLOGO", "TECNICO", "TOMA_MUESTRA"];
+    const rolesValidos = ["ADMIN", "TECNOLOGO", "TECNICO"];
     if (!rolesValidos.includes(rol)) return res.status(400).json({ success: false, message: "Rol inválido" });
     if (pin.length < 4) return res.status(400).json({ success: false, message: "PIN mínimo 4 caracteres" });
     if (await db.get("SELECT id FROM usuarios WHERE nombre = ?", [nombre])) return res.status(409).json({ success: false, message: "El usuario ya existe" });
@@ -925,8 +836,8 @@ v1.delete("/usuarios/:id", authenticate, authorize("ADMIN"), async (req, res) =>
   } catch (e) { errRes(res, e); }
 });
 
-// Montar el router versionado
-app.use("/api/v1", v1);
+// Montar el router versionado (con rate limit global por delante)
+app.use("/api/v1", apiLimiter, v1);
 
 // ════════════════════════════════════════════════════════════════════════════
 // ADMIN: HARD DELETE + RESTORE + LIST INCLUDING DELETED
@@ -940,7 +851,6 @@ const ADMIN_TABLES = {
   maestro_productos: { pk: "gtin", softCol: "fecha_baja", label: "Maestro de productos" },
   protocolos:        { pk: "id",   softCol: "fecha_baja", label: "Protocolos" },
   anexos:            { pk: "id",   softCol: "fecha_baja", label: "Anexos" },
-  diuresis:          { pk: "id",   softCol: "fecha_baja", label: "Diuresis" },
   usuarios:          { pk: "id",   softCol: "fecha_baja", label: "Usuarios" },
 };
 
@@ -1024,19 +934,16 @@ v1.get("/admin/dashboard", authenticate, authorize("ADMIN"), async (req, res) =>
         (SELECT COUNT(*) FROM inventario WHERE fecha_baja IS NOT NULL) AS stock_consumido,
         (SELECT COUNT(*) FROM maestro_productos WHERE fecha_baja IS NULL) AS productos_maestro,
         (SELECT COUNT(*) FROM usuarios WHERE fecha_baja IS NULL) AS usuarios_total,
-        (SELECT COUNT(*) FROM diuresis WHERE fecha_baja IS NULL) AS diuresis_total,
         (SELECT COUNT(*) FROM anexos WHERE fecha_baja IS NULL) AS anexos_total,
         (SELECT COUNT(*) FROM protocolos WHERE fecha_baja IS NULL) AS protocolos_total,
         (SELECT COUNT(*) FROM secciones) AS secciones_total,
         (SELECT COUNT(*) FROM logs) AS logs_total,
         (SELECT COUNT(*) FROM logs WHERE DATE(fecha) = ?) AS logs_hoy,
         (SELECT COUNT(*) FROM logs WHERE DATE(fecha) >= ?) AS logs_7d,
-        (SELECT COUNT(*) FROM diuresis WHERE DATE(fecha,'localtime') = DATE('now','localtime')) AS diuresis_hoy,
-        (SELECT COUNT(*) FROM diuresis WHERE DATE(fecha,'localtime') >= ?) AS diuresis_7d,
         (SELECT COUNT(*) FROM logs WHERE accion LIKE 'LOGIN FALLIDO' AND DATE(fecha) >= ?) AS login_fallidos_7d,
         (SELECT COUNT(*) FROM logs WHERE accion LIKE 'ACCESO DENEGADO' AND DATE(fecha) >= ?) AS denegados_7d,
         (SELECT COUNT(*) FROM login_lockouts WHERE locked_until IS NOT NULL AND locked_until > datetime('now')) AS cuentas_bloqueadas
-    `, [todayISO, last7Days, last7Days, last7Days, last30Days]);
+    `, [todayISO, last7Days, last7Days, last30Days]);
 
     // Próximos a vencer (próximos 30 / 90 días). expiration es AAMMDD.
     const allActive = await db.all(`
@@ -1116,6 +1023,11 @@ app.all(/^\/api(?!\/v\d+\/).*/, (req, res) => {
   res.status(404).json({ success: false, message: "Endpoint no encontrado. Usar /api/v1/..." });
 });
 
+// ── Catch /api/v1/* no encontrado en el router → 404 JSON (no cae al SPA) ───
+app.all(/^\/api\/v1\//, (req, res) => {
+  res.status(404).json({ success: false, message: "Endpoint no encontrado" });
+});
+
 // ── SPA fallback ────────────────────────────────────────────────────────────
 if (fs.existsSync(distPath)) {
   app.get(/(.*)/, (_req, res) => res.sendFile(path.join(distPath, "index.html")));
@@ -1126,6 +1038,20 @@ if (TLS_ENABLED) {
   const tlsOpts = { cert: fs.readFileSync(TLS_CERT_PATH), key: fs.readFileSync(TLS_KEY_PATH) };
   https.createServer(tlsOpts, app).listen(PORT, "0.0.0.0", () => {
     console.log(`\n🔒 BIO-STOCK LIMS corriendo en https://localhost:${PORT} (TLS)\n`);
+  });
+
+  // Redirect HTTP→HTTPS: los usuarios que tecleen "http://IP" (puerto 80) por costumbre
+  // son redirigidos al puerto HTTPS, en vez de fallar el handshake. Puerto configurable.
+  const REDIRECT_PORT = parseInt(process.env.HTTP_REDIRECT_PORT || "80", 10);
+  http.createServer((req, res) => {
+    const host = (req.headers.host || "localhost").split(":")[0];
+    const target = PORT === 443 ? `https://${host}${req.url}` : `https://${host}:${PORT}${req.url}`;
+    res.writeHead(301, { Location: target });
+    res.end();
+  }).listen(REDIRECT_PORT, "0.0.0.0", () => {
+    console.log(`↪  Redirect HTTP :${REDIRECT_PORT} → HTTPS :${PORT}`);
+  }).on("error", (e) => {
+    console.warn(`⚠ No se pudo abrir el redirect HTTP en :${REDIRECT_PORT} (${e.code}). Acceso solo por https://IP:${PORT}.`);
   });
 } else {
   http.createServer(app).listen(PORT, "0.0.0.0", () => {

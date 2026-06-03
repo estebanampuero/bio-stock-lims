@@ -5,14 +5,13 @@ import { DataTable, type Column } from "../components/DataTable";
 import { StatusPill } from "../components/StatusPill";
 import type { ThemeTokens } from "../adminTheme";
 
-type TablaPapelera = "inventario" | "maestro_productos" | "protocolos" | "anexos" | "diuresis" | "usuarios";
+type TablaPapelera = "inventario" | "maestro_productos" | "protocolos" | "anexos" | "usuarios";
 
 const TABLE_OPTS: { value: TablaPapelera; label: string; pk: string; nameKey: string }[] = [
   { value: "inventario",        label: "Inventario",        pk: "id",   nameKey: "gtin" },
   { value: "maestro_productos", label: "Maestro productos", pk: "gtin", nameKey: "nombre" },
   { value: "protocolos",        label: "Protocolos",        pk: "id",   nameKey: "titulo" },
   { value: "anexos",            label: "Anexos",            pk: "id",   nameKey: "servicio" },
-  { value: "diuresis",          label: "Diuresis",          pk: "id",   nameKey: "num_peticion" },
   { value: "usuarios",          label: "Usuarios",          pk: "id",   nameKey: "nombre" },
 ];
 

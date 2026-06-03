@@ -183,7 +183,11 @@ if ($svc) {
 & $nssmPath set $ServiceName AppStderr (Join-Path $logsDir "api-stderr.log") | Out-Null
 & $nssmPath set $ServiceName AppRotateFiles 1 | Out-Null
 & $nssmPath set $ServiceName AppRotateBytes 10485760 | Out-Null
-& $nssmPath set $ServiceName AppEnvironmentExtra "PORT=$Port" "SECRETS_DIR=$secretsDir" | Out-Null
+# Env del servicio. Con TLS activo forzamos REQUIRE_TLS=1 (la PII no puede ir en HTTP plano)
+# y abrimos el redirect HTTP en :80 → HTTPS para quien teclee la IP sin https://.
+$envExtra = @("PORT=$Port", "SECRETS_DIR=$secretsDir")
+if ($EnableTLS) { $envExtra += "REQUIRE_TLS=1"; $envExtra += "HTTP_REDIRECT_PORT=80" }
+& $nssmPath set $ServiceName AppEnvironmentExtra @envExtra | Out-Null
 
 # ── 7. Firewall ────────────────────────────────────────────────────────────
 Write-Host "[7/8] Configurando firewall..."

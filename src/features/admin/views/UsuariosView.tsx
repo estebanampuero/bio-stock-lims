@@ -8,7 +8,7 @@ import type { ThemeTokens } from "../adminTheme";
 import type { User, Rol } from "../../../types";
 
 const ROL_LABEL: Record<string, string> = {
-  ADMIN: "Administrador", TECNOLOGO: "Tecnólogo", TECNICO: "Técnico", TOMA_MUESTRA: "Toma muestras",
+  ADMIN: "Administrador", TECNOLOGO: "Tecnólogo", TECNICO: "Técnico",
 };
 
 export function UsuariosView({ tokens, currentUserId, onUserAction }: {
@@ -52,7 +52,7 @@ export function UsuariosView({ tokens, currentUserId, onUserAction }: {
   const columns: Column<User>[] = [
     { key: "nombre", label: "Nombre", render: r => <strong style={{ color: tokens.text }}>{r.nombre}</strong> },
     { key: "rol", label: "Rol", render: r => {
-        const kind = r.rol === "ADMIN" ? "success" : r.rol === "TECNOLOGO" ? "accent" : r.rol === "TOMA_MUESTRA" ? "warning" : "neutral";
+        const kind = r.rol === "ADMIN" ? "success" : r.rol === "TECNOLOGO" ? "accent" : "neutral";
         return <StatusPill tokens={tokens} kind={kind as any}>{ROL_LABEL[r.rol] || r.rol}</StatusPill>;
     }},
     { key: "id", label: "ID", mono: true, render: r => <span style={{ color: tokens.text3, fontSize: 11 }}>{r.id.slice(0, 8)}</span> },
@@ -94,7 +94,6 @@ export function UsuariosView({ tokens, currentUserId, onUserAction }: {
               <option value="ADMIN">Administrador</option>
               <option value="TECNOLOGO">Tecnólogo Médico</option>
               <option value="TECNICO">Técnico de Laboratorio</option>
-              <option value="TOMA_MUESTRA">Toma de Muestras</option>
             </select>
           </Field>
           <Field tokens={tokens} label="PIN inicial (mínimo 4 dígitos)">

@@ -26,3 +26,6 @@ key.pem
 .tmp-exe-build/
 server-launcher.cjs
 .claude/
+
+# Cache del scanner de seguridad (secscan)
+.secscan/

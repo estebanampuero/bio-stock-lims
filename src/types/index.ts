@@ -1,4 +1,4 @@
-export type Rol = "ADMIN" | "TECNOLOGO" | "TECNICO" | "TOMA_MUESTRA";
+export type Rol = "ADMIN" | "TECNOLOGO" | "TECNICO";
 
 export interface User {
   id: string;
@@ -28,13 +28,6 @@ export interface Protocolo {
 export interface Anexo {
   id: string; servicio: string; salas: string; numero: string;
   creado_por: string; created_at: string; updated_at: string;
-}
-
-export interface DiuresisRow {
-  id: string; num_peticion: string; rut_paciente: string; nombre_paciente: string;
-  diuresis_ml: string; peso: string; talla: string; baja_motivo: string;
-  obs_rechazo: string; motivo_vih: string; usuario: string; fecha: string;
-  archivado: number;
 }
 
 export type TempStorage = "Refrigerado" | "Congelado" | "Ambiente";
@@ -67,10 +60,6 @@ export interface MaestroRow extends PrepFields {
 
 export interface LogEntry {
   id: number; usuario: string; perfil: string; accion: string; detalles: string; fecha: string; ip?: string;
-}
-
-export interface DiuresisStats {
-  n: number; mean: number | null; std: number | null; lastValue: number | null; lastDate?: string;
 }
 
 export interface BulkImportResult {

@@ -32,8 +32,7 @@ Arquitectura, decisiones, deuda técnica y roadmap: ver [`CLAUDE.md`](CLAUDE.md)
 - JWT con TTL 8 horas (`jwt.secret` autogenerado al primer arranque)
 - PINs hasheados con bcrypt (cost 10)
 - Rate limit en `/api/login`: 10 intentos / 15 min / IP
-- Cifrado AES-256-GCM at-rest de PII (`diuresis.rut_paciente`, `diuresis.nombre_paciente`)
-- RBAC server-side por ruta (ADMIN, TECNOLOGO, TECNICO, TOMA_MUESTRA)
+- RBAC server-side por ruta (ADMIN, TECNOLOGO, TECNICO)
 - Audit log inmutable + `pii_access_log` separado
 - Forzar cambio de PIN al primer login
 

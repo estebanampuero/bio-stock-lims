@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Package, Users, FlaskConical, Activity, AlertTriangle, Shield, Droplets,
+  Package, Users, FlaskConical, Activity, AlertTriangle, Shield,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell } from "recharts";
 import { apiFetch } from "../../../lib/api";
@@ -83,7 +83,6 @@ export function DashboardView({ tokens }: { tokens: ThemeTokens }) {
         <h3 style={{ color: tokens.text, fontSize: 13, fontWeight: 600, margin: "0 0 12px", textTransform: "uppercase", letterSpacing: 0.4 }}>Actividad y seguridad</h3>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
           <MetricCard tokens={tokens} label="Usuarios" value={t.usuarios_total} icon={<Users size={18}/>} hint={data.porRol.map(r => `${r.count} ${r.rol.toLowerCase()}`).slice(0,2).join(" · ")} />
-          <MetricCard tokens={tokens} label="Diuresis hoy" value={t.diuresis_hoy} icon={<Droplets size={18}/>} hint={`${t.diuresis_7d} esta semana`} />
           <MetricCard tokens={tokens} label="Eventos hoy" value={t.logs_hoy} icon={<Activity size={18}/>} hint={`${t.logs_7d} esta semana`} />
           <MetricCard tokens={tokens}
             label="Alertas de seguridad"

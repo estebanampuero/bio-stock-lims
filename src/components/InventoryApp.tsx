@@ -3,16 +3,15 @@ import {
   Shield, LayoutDashboard, Users, Activity, History, LogOut,
   UserPlus, ClipboardList, ScanLine, ChevronDown, ChevronRight,
   FlaskConical, Pencil, Trash2, BookOpen, FileText, FilePlus,
-  Search, X, Phone, Droplets, Archive, Plus, Upload, Printer, LayoutGrid,
+  Search, X, Phone, Plus, Upload, Printer, LayoutGrid,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LabelList } from "recharts";
 import { parseGS1 } from "../utils/gs1Parser";
-import { parseDiuresisBarcode } from "../utils/diuresisParser";
 import { apiFetch, setToken, TOKEN_KEY, USER_KEY } from "../lib/api";
 import { formatExp, validarFechaGS1, getEstado, fmtDT } from "../lib/format";
 import { RolBadge, EstadoBadge, TempBadge } from "./shared/Badges";
 import { SectionHead, FErr } from "./shared/SectionHead";
-import type { InvRow, GroupedItem, Protocolo, Anexo, DiuresisRow, ProductForm, User } from "../types";
+import type { InvRow, GroupedItem, Protocolo, Anexo, ProductForm, User } from "../types";
 import { lazy, Suspense } from "react";
 const ControlCenter = lazy(() => import("../features/admin/ControlCenter").then(m => ({ default: m.ControlCenter })));
 
@@ -32,10 +31,6 @@ const EMPTY_FORM: ProductForm = {
   gtin: "", lot: "", exp: "", nombre: "", abreviado: "", detalle: "",
   seccion: "", pack: "", temperatura: "Refrigerado", preparacion: "",
   ...EMPTY_PREP,
-};
-const EMPTY_DIURESIS = {
-  num_peticion: "", rut_paciente: "", nombre_paciente: "",
-  diuresis_ml: "", peso: "", talla: "", baja_motivo: "", obs_rechazo: "", motivo_vih: "",
 };
 
 // ── Estilos base ──────────────────────────────────────────────────────────────
@@ -57,13 +52,6 @@ const navBtn = (active: boolean): React.CSSProperties => ({
   display: "flex", alignItems: "center", gap: "9px", fontSize: "13px",
   transition: "all 0.18s", boxShadow: active ? "0 4px 12px rgba(0,90,156,0.25)" : "none",
   width: "100%",
-});
-const tabBtn = (active: boolean): React.CSSProperties => ({
-  padding: "9px 20px", borderRadius: "9px", border: "none", cursor: "pointer",
-  fontWeight: 700, fontSize: "13px", transition: "all 0.15s",
-  background: active ? "#005a9c" : "rgba(0,0,0,0.05)",
-  color: active ? "white" : "#64748b",
-  boxShadow: active ? "0 4px 12px rgba(0,90,156,0.2)" : "none",
 });
 // ── Componente principal ──────────────────────────────────────────────────────
 
@@ -122,14 +110,6 @@ export default function InventoryApp() {
   const [anexoForm, setAnexoForm]       = useState({ servicio:"", salas:"", numero:"" });
   const [anexoSearch, setAnexoSearch]   = useState("");
 
-  // ─ Diuresis
-  const [diuresisHoy, setDiuresisHoy]   = useState<DiuresisRow[]>([]);
-  const [diuresisHist, setDiuresisHist] = useState<DiuresisRow[]>([]);
-  const [diuresisTab, setDiuresisTab]   = useState<"hoy"|"historico">("hoy");
-  const [diuresisForm, setDiuresisForm] = useState({ ...EMPTY_DIURESIS });
-  const [histFiltros, setHistFiltros]   = useState({ fecha:"", peticion:"", nombre:"" });
-  const [buscandoHist, setBuscandoHist] = useState(false);
-
   // ─ Force-PIN-change
   const [showPinChange, setShowPinChange] = useState(false);
   const [pinActual, setPinActual] = useState("");
@@ -155,9 +135,6 @@ export default function InventoryApp() {
     confirmState.resolve?.(result);
     setConfirmState(s => ({ ...s, open: false }));
   };
-
-  // ─ Anomaly check de diuresis
-  const [anomalyWarning, setAnomalyWarning] = useState<string|null>(null);
 
   // ─ Control Center (ERP Admin Panel)
   const [controlCenterOpen, setControlCenterOpen] = useState(false);
@@ -204,7 +181,6 @@ export default function InventoryApp() {
 
   const barcodeBuffer  = useRef("");
   const scanInputRef   = useRef<HTMLInputElement>(null);
-  const diurScanRef    = useRef<HTMLInputElement>(null);
 
   // ── Restaurar sesión desde localStorage ──────────────────────────────────────
   useEffect(() => {
@@ -221,7 +197,6 @@ export default function InventoryApp() {
             setShowLogin(false);
             if (fresh.must_change_pin) setShowPinChange(true);
             if (fresh.rol === "TECNICO") setView("Anexos");
-            else if (fresh.rol === "TOMA_MUESTRA") setView("Diuresis");
             else setView("Dashboard");
           }
         }).catch(() => {});
@@ -232,8 +207,6 @@ export default function InventoryApp() {
   // ── Permisos ─────────────────────────────────────────────────────────────────
   const isAdmin     = currentUser?.rol === "ADMIN";
   const isTecnologo = currentUser?.rol === "TECNOLOGO";
-  const isTecnico   = currentUser?.rol === "TECNICO";
-  const isToma      = currentUser?.rol === "TOMA_MUESTRA";
 
   const canInventario   = isAdmin || isTecnologo;
   const canConsumir     = isAdmin || isTecnologo;
@@ -241,47 +214,31 @@ export default function InventoryApp() {
   const canProtocolos   = isAdmin || isTecnologo;
   const canEditProto    = isAdmin || isTecnologo;
   const canCRUDAnexos   = isAdmin;
-  const canEntrarDiur   = isAdmin || isToma;
-  const canHistDiur     = isAdmin || isTecnologo;
-  const canDelDiur      = isAdmin;
 
   // ── Fetch ─────────────────────────────────────────────────────────────────────
   const fetchData = async () => {
     if (!currentUser) return;
     try {
-      const [inv, cfg, lg, prot, anx, diur] = await Promise.all([
+      const [inv, cfg, lg, prot, anx] = await Promise.all([
         apiFetch(`/inventario`),
         apiFetch(`/config`),
         apiFetch(`/logs`),
         apiFetch(`/protocolos`),
         apiFetch(`/anexos`),
-        apiFetch(`/diuresis/hoy`),
       ]);
       if (inv.ok)  setInventory(await inv.json());
       if (cfg.ok)  { const d = await cfg.json(); setSecciones(d.secciones.filter((s:any) => s.nombre)); setUsuarios(d.usuarios); }
       if (lg.ok)   { const d = await lg.json(); setLogs(Array.isArray(d) ? d : d.rows || []); }
       if (prot.ok) setProtocolos(await prot.json());
       if (anx.ok)  setAnexos(await anx.json());
-      if (diur.ok) setDiuresisHoy(await diur.json());
     } catch (e) { console.error(e); }
   };
 
   useEffect(() => { fetchData(); const id = setInterval(fetchData, 3000); return () => clearInterval(id); }, [currentUser]);
 
-  useEffect(() => {
-    if (secciones.length > 0 && !activeSection) {
-      setActiveSection(secciones[0].nombre);
-      setExpandedSections(new Set([secciones[0].nombre]));
-    }
-  }, [secciones]);
+  // Por default mostramos TODAS las secciones (incluyendo cajas sin clasificar).
+  // El usuario filtra explícitamente con los chips si quiere ver una sola sección.
 
-  // Auto-tab al entrar a Diuresis según rol
-  useEffect(() => {
-    if (view === "Diuresis") {
-      if (isTecnologo && !isAdmin) setDiuresisTab("historico");
-      else setDiuresisTab("hoy");
-    }
-  }, [view]);
 
   // ── Scanner global ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -477,70 +434,6 @@ export default function InventoryApp() {
     fetchData();
   };
 
-  // ── Diuresis ─────────────────────────────────────────────────────────────────
-  const handleDiurScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== "Enter") return; e.preventDefault();
-    const code = diurScanRef.current?.value || "";
-    if (diurScanRef.current) diurScanRef.current.value = "";
-    if (!code.trim()) return;
-    const p = parseDiuresisBarcode(code);
-    setDiuresisForm(f => ({ ...f, num_peticion:p.peticion||f.num_peticion, rut_paciente:p.rut||f.rut_paciente, nombre_paciente:p.nombre||f.nombre_paciente }));
-  };
-
-  // ── Anomaly detection: cuando hay petición + valor, comparar con histórico
-  useEffect(() => {
-    const peticion = diuresisForm.num_peticion.trim();
-    const valStr = diuresisForm.diuresis_ml.trim();
-    if (!peticion || !valStr) { setAnomalyWarning(null); return; }
-    const val = parseFloat(valStr);
-    if (isNaN(val)) { setAnomalyWarning(null); return; }
-    const id = setTimeout(async () => {
-      try {
-        const r = await apiFetch(`/diuresis/stats/${encodeURIComponent(peticion)}`);
-        if (!r.ok) { setAnomalyWarning(null); return; }
-        const s = await r.json();
-        if (s.n >= 3 && s.std !== null && s.mean !== null) {
-          const z = Math.abs(val - s.mean) / Math.max(s.std, 1);
-          if (z > 2) {
-            setAnomalyWarning(`⚠ Anomalía: ${val} ml está ${z.toFixed(1)}σ del promedio histórico (${s.mean} ± ${s.std} ml, n=${s.n}). Verificar.`);
-          } else {
-            setAnomalyWarning(null);
-          }
-        } else {
-          setAnomalyWarning(null);
-        }
-      } catch (_) { setAnomalyWarning(null); }
-    }, 600);
-    return () => clearTimeout(id);
-  }, [diuresisForm.num_peticion, diuresisForm.diuresis_ml]);
-
-  const guardarDiuresis = async () => {
-    if (!diuresisForm.num_peticion.trim()) { toast("N° Petición es obligatorio.", "error"); return; }
-    if (!diuresisForm.baja_motivo.trim()) { toast("Motivo de Baja es obligatorio.", "error"); return; }
-    await apiFetch(`/diuresis`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...diuresisForm, usuario:currentUser!.nombre }) });
-    setDiuresisForm({ ...EMPTY_DIURESIS }); fetchData();
-  };
-
-  const eliminarDiuresis = async (id: string) => {
-    if (!await confirmDialog("¿Eliminar este registro?", { kind:"danger" })) return;
-    await apiFetch(`/diuresis/${id}`, { method:"DELETE", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ usuario:currentUser!.nombre }) });
-    fetchData();
-  };
-
-  const buscarHistorico = async () => {
-    setBuscandoHist(true);
-    try {
-      const p = new URLSearchParams();
-      if (histFiltros.fecha) p.set("fecha", histFiltros.fecha);
-      if (histFiltros.peticion) p.set("peticion", histFiltros.peticion);
-      if (histFiltros.nombre) p.set("nombre", histFiltros.nombre);
-      const res = await apiFetch(`/diuresis/historico?${p}`);
-      if (res.ok) { const d = await res.json(); setDiuresisHist(Array.isArray(d) ? d : d.rows || []); }
-    } finally { setBuscandoHist(false); }
-  };
-
-  useEffect(() => { if (view === "Diuresis" && diuresisTab === "historico") buscarHistorico(); }, [diuresisTab, view]);
-
   // ── Bulk import desde Excel ─────────────────────────────────────────────────
   const handleBulkFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -647,12 +540,6 @@ export default function InventoryApp() {
     exportarPDF(`Auditoría — ${logs.length} eventos`, filas, headers);
   };
 
-  const exportarDiuresisPDF = () => {
-    const headers = ["FECHA","HORA","PETICIÓN","RUT","NOMBRE","DIURESIS","MOTIVO BAJA","USUARIO"];
-    const filas = diuresisHist.map(d => { const { fecha, hora } = fmtDT(d.fecha); return [fecha, hora, d.num_peticion, d.rut_paciente||"—", d.nombre_paciente||"—", d.diuresis_ml||"—", d.baja_motivo, d.usuario]; });
-    exportarPDF(`Diuresis Histórico — ${diuresisHist.length} registros`, filas, headers);
-  };
-
   // ── Auth ─────────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
     if (!usernameInput || !pinInput) return toast("Ingrese usuario y clave.", "error");
@@ -665,7 +552,6 @@ export default function InventoryApp() {
       if (data.user.must_change_pin) setShowPinChange(true);
       const rol = data.user.rol;
       if (rol === "TECNICO") setView("Anexos");
-      else if (rol === "TOMA_MUESTRA") setView("Diuresis");
       else setView("Dashboard");
     } else toast(data.message || "Usuario o Clave incorrectos", "error");
   };
@@ -685,6 +571,7 @@ export default function InventoryApp() {
     const res = await apiFetch(`/cambiar-pin`, { method:"POST", body:JSON.stringify({ pinActual, pinNuevo }) });
     const data = await res.json();
     if (data.success) {
+      if (data.token) setToken(data.token); // token fresco sin mustChangePin (el server ahora lo bloquea)
       setShowPinChange(false); setPinActual(""); setPinNuevo(""); setPinNuevo2("");
       setCurrentUser((u:any) => ({ ...u, must_change_pin: false }));
       toast("PIN actualizado correctamente.", "success");
@@ -706,9 +593,14 @@ export default function InventoryApp() {
   const productNames = [...new Set(inventory.map(i => i.nombre).filter(Boolean) as string[])].sort();
 
   const filteredInv = inventory.filter(i => {
-    if (activeSection && i.seccion !== activeSection) return false;
+    if (activeSection === "__sin_clasificar__") {
+      if (i.nombre) return false; // mostrar SOLO los sin clasificar
+    } else if (activeSection && i.seccion !== activeSection) return false;
     if (activeProduct && i.nombre !== activeProduct) return false;
-    if (searchTerm) { const t = searchTerm.toLowerCase(); return i.nombre?.toLowerCase().includes(t) || i.lot?.toLowerCase().includes(t) || i.gtin?.includes(t); }
+    if (searchTerm) {
+      const t = searchTerm.toLowerCase();
+      return (i.nombre?.toLowerCase().includes(t) || i.abreviado?.toLowerCase().includes(t) || i.lot?.toLowerCase().includes(t) || i.gtin?.toLowerCase().includes(t)) ?? false;
+    }
     return true;
   });
 
@@ -797,7 +689,6 @@ export default function InventoryApp() {
           {canInventario && <button onClick={()=>setView("Dashboard")} style={navBtn(view==="Dashboard")}><LayoutDashboard size={14}/> Inventario</button>}
           {canProtocolos && <button onClick={()=>setView("Protocolos")} style={navBtn(view==="Protocolos")}><FileText size={14}/> Protocolos</button>}
           <button onClick={()=>setView("Anexos")} style={navBtn(view==="Anexos")}><Phone size={14}/> Anexos Telefónicos</button>
-          <button onClick={()=>setView("Diuresis")} style={navBtn(view==="Diuresis")}><Droplets size={14}/> Diuresis y Bajas</button>
           {isAdmin && <button onClick={()=>setView("Importar")} style={navBtn(view==="Importar")}><Upload size={14}/> Importar Excel</button>}
           {isAdmin && <button onClick={()=>setView("Usuarios")} style={navBtn(view==="Usuarios")}><Users size={14}/> Personal</button>}
           {isAdmin && <button onClick={()=>setView("Logs")} style={navBtn(view==="Logs")}><History size={14}/> Auditoría</button>}
@@ -888,7 +779,7 @@ export default function InventoryApp() {
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:12 }}>
               <div>
                 <h2 style={{ margin:0, color:"#005a9c", fontWeight:800, fontSize:"22px" }}>
-                  {activeSection || "Inventario completo"}{activeProduct && <span style={{ color:"#64748b", fontWeight:600 }}> › {activeProduct}</span>}
+                  {activeSection === "__sin_clasificar__" ? "Sin clasificar" : activeSection || "Inventario completo"}{activeProduct && <span style={{ color:"#64748b", fontWeight:600 }}> › {activeProduct}</span>}
                 </h2>
                 <p style={{ margin:"4px 0 0", color:"#64748b", fontSize:"13px" }}>
                   {chartRows.length} control{chartRows.length!==1?"es":""} · {filteredInv.length} unidad{filteredInv.length!==1?"es":""}
@@ -933,6 +824,19 @@ export default function InventoryApp() {
                     {s.nombre} <span style={{ opacity:0.7, marginLeft:4 }}>{s.count}</span>
                   </button>
                 ))}
+                {(() => {
+                  const sinClasif = inventory.filter(i => !i.nombre).length;
+                  if (sinClasif === 0) return null;
+                  return (
+                    <button onClick={()=>{ setActiveSection("__sin_clasificar__"); setActiveProduct(null); }}
+                      style={{ padding:"5px 12px", borderRadius:7, border:"none",
+                        background: activeSection === "__sin_clasificar__" ? "#d97706" : "rgba(245,158,11,0.12)",
+                        color: activeSection === "__sin_clasificar__" ? "white" : "#92400e",
+                        cursor:"pointer", fontSize:"12px", fontWeight:700 }}>
+                      ⚠ Sin clasificar <span style={{ opacity:0.8, marginLeft:4 }}>{sinClasif}</span>
+                    </button>
+                  );
+                })()}
               </div>
             )}
 
@@ -1069,129 +973,6 @@ export default function InventoryApp() {
                   </table>
                 </div>
             }
-          </div>
-        )}
-
-        {/* ─── DIURESIS Y BAJAS DE EXAMEN ──────────────────────────────────── */}
-        {view === "Diuresis" && (
-          <div style={{ maxWidth:1100 }}>
-            <SectionHead title="Diuresis y Bajas de Examen" icon={<Droplets/>}/>
-
-            {/* Tabs */}
-            <div style={{ display:"flex", gap:8, marginBottom:20 }}>
-              {(isAdmin || isToma || isTecnico) && <button onClick={()=>setDiuresisTab("hoy")} style={tabBtn(diuresisTab==="hoy")}>Registros de Hoy</button>}
-              {canHistDiur && <button onClick={()=>setDiuresisTab("historico")} style={tabBtn(diuresisTab==="historico")}><Archive size={13} style={{ verticalAlign:"middle", marginRight:4 }}/>Historial</button>}
-            </div>
-
-            {/* ── TAB HOY ── */}
-            {diuresisTab === "hoy" && (
-              <>
-                {/* Formulario ingreso */}
-                {canEntrarDiur && (
-                  <div style={{ ...glass, padding:22, marginBottom:18 }}>
-                    <div style={{ fontSize:"12px", fontWeight:800, color:"#005a9c", marginBottom:14 }}>NUEVO REGISTRO</div>
-                    {/* Scan */}
-                    <div style={{ background:"rgba(0,90,156,0.04)", border:"2px dashed rgba(0,90,156,0.18)", borderRadius:10, padding:"10px 12px", marginBottom:14 }}>
-                      <div style={{ fontSize:"10px", fontWeight:800, color:"#005a9c", marginBottom:5, letterSpacing:"0.5px" }}>ESCANEAR CÓDIGO DE PACIENTE</div>
-                      <input ref={diurScanRef} onKeyDown={handleDiurScan} placeholder="Apunte aquí y escanee → auto-completa Petición, RUT y Nombre" style={{ ...inp, background:"white" }}/>
-                    </div>
-                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:10 }}>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>N° PETICIÓN *</div><input value={diuresisForm.num_peticion} onChange={e=>setDiuresisForm(f=>({...f,num_peticion:e.target.value}))} placeholder="Obligatorio" style={inp}/></div>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>RUT PACIENTE</div><input value={diuresisForm.rut_paciente} onChange={e=>setDiuresisForm(f=>({...f,rut_paciente:e.target.value}))} placeholder="12.345.678-9" style={inp}/></div>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE PACIENTE</div><input value={diuresisForm.nombre_paciente} onChange={e=>setDiuresisForm(f=>({...f,nombre_paciente:e.target.value}))} placeholder="Apellido, Nombre" style={inp}/></div>
-                    </div>
-                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 2fr", gap:10, marginBottom:10 }}>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DIURESIS (ml)</div><input value={diuresisForm.diuresis_ml} onChange={e=>setDiuresisForm(f=>({...f,diuresis_ml:e.target.value}))} placeholder="—" style={inp}/></div>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>PESO (kg)</div><input value={diuresisForm.peso} onChange={e=>setDiuresisForm(f=>({...f,peso:e.target.value}))} placeholder="—" style={inp}/></div>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>TALLA (cm)</div><input value={diuresisForm.talla} onChange={e=>setDiuresisForm(f=>({...f,talla:e.target.value}))} placeholder="—" style={inp}/></div>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>MOTIVO DE BAJA *</div><input value={diuresisForm.baja_motivo} onChange={e=>setDiuresisForm(f=>({...f,baja_motivo:e.target.value}))} placeholder="Obligatorio" style={inp}/></div>
-                    </div>
-                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>OBSERVACIÓN RECHAZO</div><input value={diuresisForm.obs_rechazo} onChange={e=>setDiuresisForm(f=>({...f,obs_rechazo:e.target.value}))} placeholder="Opcional" style={inp}/></div>
-                      <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>MOTIVO VIH</div><input value={diuresisForm.motivo_vih} onChange={e=>setDiuresisForm(f=>({...f,motivo_vih:e.target.value}))} placeholder="Opcional" style={inp}/></div>
-                    </div>
-                    {anomalyWarning && (
-                      <div style={{ background:"rgba(245,158,11,0.08)", border:"1px solid rgba(245,158,11,0.3)", borderRadius:10, padding:"10px 14px", marginBottom:12, color:"#92400e", fontSize:"12px", fontWeight:700, lineHeight:1.5 }}>
-                        {anomalyWarning}
-                      </div>
-                    )}
-                    <button onClick={guardarDiuresis} style={{ padding:"12px 24px", background:"#005a9c", color:"white", border:"none", borderRadius:10, fontWeight:800, cursor:"pointer", fontSize:"13px", boxShadow:"0 4px 14px rgba(0,90,156,0.3)" }}>GUARDAR REGISTRO</button>
-                  </div>
-                )}
-
-                {/* Tabla hoy */}
-                {diuresisHoy.length === 0
-                  ? <div style={{ ...glass, padding:40, textAlign:"center", color:"#94a3b8" }}><Droplets size={36} style={{ opacity:0.2, marginBottom:10 }}/><p style={{ fontWeight:700, margin:0 }}>Sin registros para hoy</p></div>
-                  : <div style={{ ...glass, overflow:"hidden" }}>
-                      <div style={{ padding:"12px 16px", borderBottom:"1px solid rgba(0,0,0,0.05)", fontSize:"12px", fontWeight:700, color:"#64748b" }}>{diuresisHoy.length} registro{diuresisHoy.length!==1?"s":""} del día</div>
-                      <div style={{ overflowX:"auto" }}>
-                        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"12px", minWidth:900 }}>
-                          <thead><tr style={{ background:"rgba(0,90,156,0.04)" }}>{["PETICIÓN","RUT","NOMBRE","DIURESIS","PESO","TALLA","MOTIVO BAJA","OBS. RECHAZO","USUARIO","HORA",...(canDelDiur?["—"]:[])].map(h=><th key={h} style={{ padding:"10px 12px", fontWeight:800, color:"#005a9c", fontSize:"10px", textAlign:"left", whiteSpace:"nowrap" }}>{h}</th>)}</tr></thead>
-                          <tbody>
-                            {diuresisHoy.map(d => { const { hora } = fmtDT(d.fecha); return (
-                              <tr key={d.id} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
-                                <td style={{ padding:"10px 12px", fontFamily:"'Roboto Mono',monospace", fontWeight:700, color:"#005a9c" }}>{d.num_peticion}</td>
-                                <td style={{ padding:"10px 12px", fontFamily:"'Roboto Mono',monospace", color:"#334155" }}>{d.rut_paciente||"—"}</td>
-                                <td style={{ padding:"10px 12px", fontWeight:600, color:"#1e293b", whiteSpace:"nowrap" }}>{d.nombre_paciente||"—"}</td>
-                                <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:700 }}>{d.diuresis_ml||"—"}</td>
-                                <td style={{ padding:"10px 12px", textAlign:"center" }}>{d.peso||"—"}</td>
-                                <td style={{ padding:"10px 12px", textAlign:"center" }}>{d.talla||"—"}</td>
-                                <td style={{ padding:"10px 12px", color:"#475569" }}>{d.baja_motivo}</td>
-                                <td style={{ padding:"10px 12px", color:"#64748b", fontSize:"11px" }}>{d.obs_rechazo||"—"}</td>
-                                <td style={{ padding:"10px 12px", color:"#94a3b8", fontSize:"11px" }}>{d.usuario}</td>
-                                <td style={{ padding:"10px 12px", fontFamily:"'Roboto Mono',monospace", color:"#64748b", whiteSpace:"nowrap" }}>{hora}</td>
-                                {canDelDiur && <td style={{ padding:"10px 12px" }}><button onClick={()=>eliminarDiuresis(d.id)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"4px 8px", borderRadius:6, cursor:"pointer", fontWeight:700, fontSize:"10px" }}><Trash2 size={10}/></button></td>}
-                              </tr>
-                            ); })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                }
-              </>
-            )}
-
-            {/* ── TAB HISTORIAL ── */}
-            {diuresisTab === "historico" && canHistDiur && (
-              <>
-                <div style={{ ...glass, padding:18, marginBottom:16, display:"flex", gap:12, alignItems:"flex-end", flexWrap:"wrap" }}>
-                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>FECHA</div><input type="date" value={histFiltros.fecha} onChange={e=>setHistFiltros(f=>({...f,fecha:e.target.value}))} style={{ ...inp, width:160 }}/></div>
-                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>N° PETICIÓN</div><input value={histFiltros.peticion} onChange={e=>setHistFiltros(f=>({...f,peticion:e.target.value}))} placeholder="Buscar…" style={{ ...inp, width:160 }}/></div>
-                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOMBRE PACIENTE</div><input value={histFiltros.nombre} onChange={e=>setHistFiltros(f=>({...f,nombre:e.target.value}))} placeholder="Buscar…" style={{ ...inp, width:200 }}/></div>
-                  <button onClick={buscarHistorico} style={{ padding:"10px 20px", background:"#005a9c", color:"white", border:"none", borderRadius:9, fontWeight:800, cursor:"pointer", fontSize:"13px" }}>{buscandoHist?"Buscando…":"BUSCAR"}</button>
-                  <button onClick={()=>{ setHistFiltros({fecha:"",peticion:"",nombre:""}); buscarHistorico(); }} style={{ padding:"10px 14px", background:"rgba(0,0,0,0.05)", color:"#64748b", border:"none", borderRadius:9, fontWeight:700, cursor:"pointer", fontSize:"13px" }}>Limpiar</button>
-                </div>
-                {diuresisHist.length === 0
-                  ? <div style={{ ...glass, padding:40, textAlign:"center", color:"#94a3b8" }}><Archive size={36} style={{ opacity:0.2, marginBottom:10 }}/><p style={{ fontWeight:700, margin:0 }}>Sin registros — aplica filtros y haz clic en Buscar</p></div>
-                  : <div style={{ ...glass, overflow:"hidden" }}>
-                      <div style={{ padding:"12px 16px", borderBottom:"1px solid rgba(0,0,0,0.05)", fontSize:"12px", fontWeight:700, color:"#64748b", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                        <span>{diuresisHist.length} resultado{diuresisHist.length!==1?"s":""}</span>
-                        <button onClick={exportarDiuresisPDF} style={{ display:"flex", alignItems:"center", gap:5, padding:"6px 12px", background:"#005a9c", color:"white", border:"none", borderRadius:7, fontWeight:700, cursor:"pointer", fontSize:"11px" }}><Printer size={11}/> PDF</button>
-                      </div>
-                      <div style={{ overflowX:"auto" }}>
-                        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"12px", minWidth:900 }}>
-                          <thead><tr style={{ background:"rgba(0,90,156,0.04)" }}>{["FECHA","HORA","PETICIÓN","RUT","NOMBRE","DIURESIS","MOTIVO BAJA","OBS.","USUARIO"].map(h=><th key={h} style={{ padding:"10px 12px", fontWeight:800, color:"#005a9c", fontSize:"10px", textAlign:"left", whiteSpace:"nowrap" }}>{h}</th>)}</tr></thead>
-                          <tbody>
-                            {diuresisHist.map(d => { const { fecha, hora } = fmtDT(d.fecha); return (
-                              <tr key={d.id} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
-                                <td style={{ padding:"10px 12px", fontFamily:"'Roboto Mono',monospace", color:"#334155", whiteSpace:"nowrap" }}>{fecha}</td>
-                                <td style={{ padding:"10px 12px", fontFamily:"'Roboto Mono',monospace", color:"#64748b", whiteSpace:"nowrap" }}>{hora}</td>
-                                <td style={{ padding:"10px 12px", fontFamily:"'Roboto Mono',monospace", fontWeight:700, color:"#005a9c" }}>{d.num_peticion}</td>
-                                <td style={{ padding:"10px 12px", color:"#334155" }}>{d.rut_paciente||"—"}</td>
-                                <td style={{ padding:"10px 12px", fontWeight:600, color:"#1e293b" }}>{d.nombre_paciente||"—"}</td>
-                                <td style={{ padding:"10px 12px", textAlign:"center" }}>{d.diuresis_ml||"—"}</td>
-                                <td style={{ padding:"10px 12px", color:"#475569" }}>{d.baja_motivo}</td>
-                                <td style={{ padding:"10px 12px", color:"#64748b", fontSize:"11px" }}>{d.obs_rechazo||"—"}</td>
-                                <td style={{ padding:"10px 12px", color:"#94a3b8", fontSize:"11px" }}>{d.usuario}</td>
-                              </tr>
-                            ); })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                }
-              </>
-            )}
           </div>
         )}
 
@@ -1336,7 +1117,6 @@ export default function InventoryApp() {
                   <option value="ADMIN">Administrador</option>
                   <option value="TECNOLOGO">Tecnólogo Médico</option>
                   <option value="TECNICO">Técnico de Laboratorio</option>
-                  <option value="TOMA_MUESTRA">Toma de Muestras</option>
                 </select>
                 <input placeholder="PIN numérico" value={newUser.pin} onChange={e=>setNewUser({...newUser,pin:e.target.value})} style={inp}/>
                 <button onClick={crearUsuario} style={{ background:"#005a9c", color:"white", border:"none", borderRadius:9, fontWeight:800, cursor:"pointer", fontSize:"13px" }}>CREAR ACCESO</button>

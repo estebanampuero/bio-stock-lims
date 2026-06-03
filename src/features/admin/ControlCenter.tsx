@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense, type ReactNode } from "react";
 import {
   LayoutDashboard, Users, Package, FlaskConical, Layers, FileText,
-  Phone, Droplets, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2,
+  Phone, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2,
 } from "lucide-react";
 import { useTheme } from "./hooks/useTheme";
 import { Breadcrumbs } from "./components/Breadcrumbs";
@@ -18,14 +18,13 @@ const MaestroView     = lazy(() => import("./views/MaestroView").then(m => ({ de
 const SeccionesView   = lazy(() => import("./views/SeccionesView").then(m => ({ default: m.SeccionesView })));
 const ProtocolosView  = lazy(() => import("./views/ProtocolosView").then(m => ({ default: m.ProtocolosView })));
 const AnexosView      = lazy(() => import("./views/AnexosView").then(m => ({ default: m.AnexosView })));
-const DiuresisView    = lazy(() => import("./views/DiuresisView").then(m => ({ default: m.DiuresisView })));
 const LogsView        = lazy(() => import("./views/LogsView").then(m => ({ default: m.LogsView })));
 const SecurityView    = lazy(() => import("./views/SecurityView").then(m => ({ default: m.SecurityView })));
 const PapeleraView    = lazy(() => import("./views/PapeleraView").then(m => ({ default: m.PapeleraView })));
 
 type Section =
   | "dashboard" | "usuarios" | "inventario" | "maestro" | "secciones"
-  | "protocolos" | "anexos" | "diuresis" | "logs" | "security" | "papelera";
+  | "protocolos" | "anexos" | "logs" | "security" | "papelera";
 
 interface NavItem {
   id: Section;
@@ -43,7 +42,6 @@ const NAV: NavItem[] = [
   { id: "secciones",  label: "Secciones",  icon: <Layers size={15}/>,          group: "operations", description: "Áreas del laboratorio" },
   { id: "protocolos", label: "Protocolos", icon: <FileText size={15}/>,        group: "operations", description: "SOPs del laboratorio" },
   { id: "anexos",     label: "Anexos",     icon: <Phone size={15}/>,           group: "operations", description: "Directorio telefónico" },
-  { id: "diuresis",   label: "Diuresis",   icon: <Droplets size={15}/>,        group: "operations", description: "Registros de pacientes" },
 
   { id: "usuarios",   label: "Usuarios",   icon: <Users size={15}/>,           group: "data",       description: "Personal del laboratorio" },
   { id: "logs",       label: "Auditoría",  icon: <ClipboardList size={15}/>,   group: "data",       description: "Registro completo de eventos" },
@@ -101,7 +99,6 @@ export function ControlCenter({ currentUser, onExit, onToast }: {
           {section === "secciones"  && <SeccionesView tokens={tokens} />}
           {section === "protocolos" && <ProtocolosView tokens={tokens} />}
           {section === "anexos"     && <AnexosView tokens={tokens} />}
-          {section === "diuresis"   && <DiuresisView tokens={tokens} onAction={(m, k) => onToast(m, k)} />}
           {section === "logs"       && <LogsView tokens={tokens} />}
           {section === "security"   && <SecurityView tokens={tokens} />}
           {section === "papelera"   && <PapeleraView tokens={tokens} onAction={onToast} />}

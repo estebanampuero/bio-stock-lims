@@ -4,11 +4,10 @@ const rolColor: Record<string, { bg: string; color: string }> = {
   ADMIN:        { bg: "rgba(16,185,129,0.15)",  color: "#059669" },
   TECNOLOGO:    { bg: "rgba(0,90,156,0.12)",    color: "#005a9c" },
   TECNICO:      { bg: "rgba(99,102,241,0.12)",  color: "#4338ca" },
-  TOMA_MUESTRA: { bg: "rgba(245,158,11,0.12)",  color: "#d97706" },
 };
 const rolLabel: Record<string, string> = {
   ADMIN: "Administrador", TECNOLOGO: "Tecnólogo Médico",
-  TECNICO: "Técnico Lab.", TOMA_MUESTRA: "Toma de Muestras",
+  TECNICO: "Técnico Lab.",
 };
 
 export function RolBadge({ rol }: { rol: string }) {
