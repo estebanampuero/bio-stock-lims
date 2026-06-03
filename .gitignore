@@ -29,3 +29,6 @@ server-launcher.cjs
 
 # Cache del scanner de seguridad (secscan)
 .secscan/
+
+# Marcador para forzar HTTP en preview (nunca debe existir)
+.no-tls-preview
