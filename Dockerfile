@@ -1,0 +1,31 @@
+# BIO-STOCK LIMS — imagen Docker (frontend Vite + API Express en un solo proceso)
+# ───────────────────────────────────────────────────────────────────────────
+# La DB SQLite y los secretos viven en /data (montar un volumen para persistir).
+
+# ── Build: compila el frontend y resuelve dependencias (incl. sqlite3 nativo) ──
+FROM node:20-bookworm-slim AS build
+WORKDIR /app
+# Toolchain por si sqlite3 necesita compilar (si hay prebuilt, no se usa)
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+RUN npm ci --include=dev
+COPY . .
+RUN npm run build && npm prune --omit=dev
+
+# ── Runtime: solo lo necesario para correr ─────────────────────────────────────
+FROM node:20-bookworm-slim
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=3000 \
+    DB_PATH=/data/inventario_biorad.db \
+    SECRETS_DIR=/data/secrets
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY server.cjs ./
+RUN mkdir -p /data/secrets
+EXPOSE 3000
+# Healthcheck contra el endpoint /health del propio server
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+CMD ["node", "server.cjs"]
