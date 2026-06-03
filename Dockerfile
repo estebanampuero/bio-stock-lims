@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
   && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 RUN npm ci --include=dev
+# Recompilar sqlite3 desde fuente: el prebuilt exige GLIBC 2.38 y la imagen trae 2.36
+RUN npm rebuild sqlite3 --build-from-source
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
