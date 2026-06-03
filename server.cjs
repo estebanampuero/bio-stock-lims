@@ -322,6 +322,26 @@ Generado: ${new Date().toISOString()}
   console.log(`🔐 PIN admin default rotado: ${pinFile}`);
 }
 
+// ── Seed de admin desde variables de entorno (para hosting sin disco persistente)
+// Si SEED_ADMIN_USER + SEED_ADMIN_PASS están definidas, crea/actualiza ese admin al
+// arrancar. Útil en Render Free (la DB se reinicia en cada deploy). Las credenciales
+// viven en variables de entorno del host, nunca en el código.
+async function seedAdminFromEnv() {
+  const nombre = process.env.SEED_ADMIN_USER;
+  const pass   = process.env.SEED_ADMIN_PASS;
+  if (!nombre || !pass) return;
+  try {
+    const hash = await bcrypt.hash(pass, 10);
+    const existing = await db.get("SELECT id FROM usuarios WHERE nombre = ?", [nombre]);
+    if (existing) {
+      await db.run("UPDATE usuarios SET pin = ?, rol = 'ADMIN', must_change_pin = 0, fecha_baja = NULL WHERE id = ?", [hash, existing.id]);
+    } else {
+      await db.run("INSERT INTO usuarios (id, nombre, rol, pin, must_change_pin) VALUES (?, ?, 'ADMIN', ?, 0)", [randomUUID(), nombre, hash]);
+    }
+    console.log(`👤 Admin sembrado desde env: ${nombre}`);
+  } catch (e) { console.error("Seed admin falló:", e.message); }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // LOGGING
 // ════════════════════════════════════════════════════════════════════════════
@@ -430,6 +450,7 @@ async function backupAlArranqueSiHaceFalta() {
   await db.exec("PRAGMA foreign_keys = ON");
   await runMigrations(db);
   await rotateDefaultAdminPin();
+  await seedAdminFromEnv();
   console.log(`✅ BIO-STOCK API lista. DB: ${DB_PATH}`);
   await backupAlArranqueSiHaceFalta();
   programarBackupDiario();

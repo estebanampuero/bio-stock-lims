@@ -1,0 +1,37 @@
+# Blueprint de despliegue en Render — BIO-STOCK LIMS (entorno de PRUEBAS)
+# ───────────────────────────────────────────────────────────────────────────
+# Render conecta tu repo de GitHub y despliega automáticamente con cada push.
+# Render provee HTTPS en https://<servicio>.onrender.com (no se necesita TLS local).
+#
+# Plan free: el servicio se duerme tras ~15 min de inactividad (la 1ª visita
+# tarda ~30-60s en despertar) y NO tiene disco persistente, por lo que la base
+# SQLite se REINICIA en cada deploy. Por eso el admin se siembra desde env
+# (SEED_ADMIN_USER / SEED_ADMIN_PASS) en cada arranque.
+#
+# Cómo usarlo:
+#   1. Render Dashboard → New → Blueprint → conecta este repo.
+#   2. Render lee este archivo. En "Environment", define:
+#        SEED_ADMIN_USER = MMA
+#        SEED_ADMIN_PASS = (tu clave)
+#   3. Deploy. La URL será https://bio-stock-lims.onrender.com (o similar).
+
+services:
+  - type: web
+    name: bio-stock-lims
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node server.cjs
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Credenciales del admin sembrado al arranque. Se definen en el dashboard
+      # de Render (sync:false = NO viven en este archivo ni en git).
+      - key: SEED_ADMIN_USER
+        sync: false
+      - key: SEED_ADMIN_PASS
+        sync: false
