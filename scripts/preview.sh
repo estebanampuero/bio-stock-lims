@@ -43,4 +43,5 @@ echo ""
 
 # Cloudflare quick tunnel en foreground: imprime la URL pública (trycloudflare.com).
 # Sin cuenta ni configuración. La URL cambia en cada arranque.
-cloudflared tunnel --url "http://localhost:$PORT"
+# --protocol http2: evita QUIC/UDP, que algunas redes filtran y tumban el túnel.
+cloudflared tunnel --protocol http2 --url "http://localhost:$PORT"
