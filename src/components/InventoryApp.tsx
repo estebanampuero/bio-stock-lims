@@ -11,6 +11,7 @@ import { apiFetch, setToken, TOKEN_KEY, USER_KEY } from "../lib/api";
 import { formatExp, validarFechaGS1, getEstado, fmtDT } from "../lib/format";
 import { RolBadge, EstadoBadge, TempBadge } from "./shared/Badges";
 import { SectionHead, FErr } from "./shared/SectionHead";
+import { ScanDiagnostic } from "./ScanDiagnostic";
 import type { InvRow, GroupedItem, Protocolo, Anexo, ProductForm, User } from "../types";
 import { lazy, Suspense } from "react";
 const ControlCenter = lazy(() => import("../features/admin/ControlCenter").then(m => ({ default: m.ControlCenter })));
@@ -74,6 +75,7 @@ export default function InventoryApp() {
 
   // ─ Modal clasificar
   const [showModal, setShowModal]       = useState(false);
+  const [showScanDiag, setShowScanDiag] = useState(false);
   const [form, setForm]                 = useState<ProductForm>(EMPTY_FORM);
   const [gtinLocked, setGtinLocked]     = useState(false);
   const [expError, setExpError]         = useState<string|null>(null);
@@ -734,6 +736,7 @@ export default function InventoryApp() {
           {canInventario && <button onClick={()=>setView("Dashboard")} style={navBtn(view==="Dashboard")}><LayoutDashboard size={14}/> Inventario</button>}
           {canProtocolos && <button onClick={()=>setView("Protocolos")} style={navBtn(view==="Protocolos")}><FileText size={14}/> Protocolos</button>}
           <button onClick={()=>setView("Anexos")} style={navBtn(view==="Anexos")}><Phone size={14}/> Anexos Telefónicos</button>
+          {canInventario && <button onClick={()=>setShowScanDiag(true)} style={navBtn(false)}><ScanLine size={14}/> Diagnóstico escáner</button>}
           {isAdmin && <button onClick={()=>setView("Importar")} style={navBtn(view==="Importar")}><Upload size={14}/> Importar Excel</button>}
           {isAdmin && <button onClick={()=>setView("Usuarios")} style={navBtn(view==="Usuarios")}><Users size={14}/> Personal</button>}
           {isAdmin && <button onClick={()=>setView("Logs")} style={navBtn(view==="Logs")}><History size={14}/> Auditoría</button>}
@@ -1228,6 +1231,8 @@ export default function InventoryApp() {
       </main>
 
       {/* ══ MODAL: Clasificar control ════════════════════════════════════════ */}
+      {showScanDiag && <ScanDiagnostic onClose={()=>setShowScanDiag(false)} />}
+
       {showModal && (
         <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.65)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:3000 }}>
           <div style={{ ...glass, background:"rgba(255,255,255,0.96)", padding:30, width:500, maxHeight:"92vh", overflowY:"auto" }}>
