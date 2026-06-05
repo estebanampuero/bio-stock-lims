@@ -377,7 +377,8 @@ async function registrarLog(usuario, accion, detalles, ip = "desconocida") {
 // BACKUP AUTOMÁTICO DIARIO (02:00 + uno al arranque si > 24h sin backup)
 // ════════════════════════════════════════════════════════════════════════════
 
-const BACKUPS_DIR     = path.join(BASE_DIR, "backups");
+// Backups: configurable para apuntar a un volumen persistente (en Docker: /data/backups)
+const BACKUPS_DIR     = process.env.BACKUPS_DIR || path.join(BASE_DIR, "backups");
 const BACKUP_RETAIN_DAYS = 30;
 
 function listBackups() {
@@ -876,9 +877,21 @@ v1.delete("/usuarios/:id", authenticate, authorize("ADMIN"), async (req, res) =>
 });
 
 // ── SCAN FORMATS (formatos de escáner configurables, globales) ────────────────
+// Heurística anti-ReDoS: rechaza regex muy largas o con cuantificador anidado
+// (p.ej. (a+)+ ) que podrían colgar el navegador del cliente al escanear.
+function regexPeligrosa(rx) {
+  if (!rx) return false;
+  if (rx.length > 400) return true;
+  if (/\([^()]*[+*][^()]*\)[+*?]/.test(rx)) return true;   // (…+…)+  /  (…*…)*
+  if (/\[[^\]]*\][+*]\{?\d*,?\d*\}?[+*]/.test(rx)) return true; // [..]+ seguido de otro cuantificador amplio
+  return false;
+}
 function validarRegexCampos({ gtin_regex, lot_regex, exp_regex }) {
   for (const [k, rx] of [["gtin", gtin_regex], ["lote", lot_regex], ["vencimiento", exp_regex]]) {
-    if (rx) { try { new RegExp(rx); } catch (e) { return `Regex de ${k} inválida: ${e.message}`; } }
+    if (rx) {
+      try { new RegExp(rx); } catch (e) { return `Regex de ${k} inválida: ${e.message}`; }
+      if (regexPeligrosa(rx)) return `Regex de ${k} demasiado riesgosa (posible ReDoS / muy larga). Simplifícala.`;
+    }
   }
   return null;
 }

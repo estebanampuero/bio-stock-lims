@@ -21,11 +21,14 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000 \
     DB_PATH=/data/inventario_biorad.db \
-    SECRETS_DIR=/data/secrets
+    SECRETS_DIR=/data/secrets \
+    BACKUPS_DIR=/data/backups
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server.cjs ./
-RUN mkdir -p /data/secrets
+# Usuario no-root (uid 10001). El volumen /data se chowna en el deploy.
+RUN useradd -u 10001 -m -s /usr/sbin/nologin app && mkdir -p /data/secrets /data/backups && chown -R 10001:10001 /data /app
+USER app
 EXPOSE 3000
 # Healthcheck contra el endpoint /health del propio server
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
