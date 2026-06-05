@@ -255,11 +255,49 @@ export default function InventoryApp() {
 
   // ── Flujo inventario ─────────────────────────────────────────────────────────
   const procesarEscaneo = async (code: string) => {
-    const p = parseGS1(code) || { gtin: code.replace(/\D/g,"").slice(-14) || code, lot:"", expiration:"" };
-    const res = await apiFetch(`/producto/${p.gtin}`);
+    const parsed = parseGS1(code);
+    const gtin = parsed?.gtin || code.replace(/\D/g, "").slice(-14) || code;
+    const res = await apiFetch(`/producto/${gtin}`);
     const existe = await res.json();
-    if (existe) { await registrarEnDB(p); setActiveSection(existe.seccion); setExpandedSections(prev => new Set([...prev, existe.seccion])); }
-    else { setForm({ ...EMPTY_FORM, gtin:p.gtin, lot:p.lot, exp:p.expiration, seccion:activeSection||"" }); setGtinLocked(true); setExpError(null); setProductoExiste(false); setShowModal(true); }
+
+    // Producto sin clasificar → modal de registro maestro
+    if (!existe) {
+      setForm({ ...EMPTY_FORM, gtin, lot: parsed?.lot || "", exp: parsed?.expiration || "", seccion: activeSection || "" });
+      setGtinLocked(true); setExpError(null); setProductoExiste(false); setShowModal(true);
+      return;
+    }
+
+    // Producto existe → para sumar una unidad necesitamos lote + vencimiento
+    let lot = parsed?.lot || "";
+    let expiration = parsed?.expiration || "";
+
+    // Si el código no trae lote/vencimiento, reusar el lote activo si es inequívoco
+    if (!lot || !expiration) {
+      const lotes = [...new Map(inventory.filter(i => i.gtin === gtin).map(i => [i.lot, i])).values()];
+      if (lotes.length === 1) { lot = lotes[0].lot; expiration = lotes[0].expiration; }
+    }
+
+    // No se pudo determinar el lote (código incompleto + 0 o varios lotes) → modal prellenado
+    if (!lot || !expiration) {
+      setForm({
+        ...EMPTY_FORM, gtin, lot, exp: expiration,
+        nombre: existe.nombre, abreviado: existe.abreviado || "", detalle: existe.detalle || "",
+        seccion: existe.seccion, pack: existe.pack || "",
+        temperatura: existe.almacenamiento_sin_abrir || existe.temperatura || "Refrigerado",
+        preparacion: existe.preparacion || "",
+        almacenamiento_sin_abrir: existe.almacenamiento_sin_abrir || existe.temperatura || "",
+      });
+      setGtinLocked(true); setExpError(null); setProductoExiste(true); setShowModal(true);
+      toast("El código no incluye lote/vencimiento. Complétalo para sumar la unidad.", "info");
+      return;
+    }
+
+    const ok = await registrarEnDB({ gtin, lot, expiration });
+    if (ok) {
+      toast(`Unidad agregada: ${existe.nombre}`, "success");
+      setActiveSection(existe.seccion);
+      setExpandedSections(prev => new Set([...prev, existe.seccion]));
+    }
   };
 
   const handleModalScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -296,9 +334,15 @@ export default function InventoryApp() {
     setGtinLocked(true); setExpError(null);
   };
 
-  const registrarEnDB = async (p: { gtin:string; lot:string; expiration:string }) => {
-    await apiFetch(`/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...p, scanDate:new Date().toISOString(), usuario:currentUser!.nombre }) });
-    fetchData();
+  const registrarEnDB = async (p: { gtin:string; lot:string; expiration:string }): Promise<boolean> => {
+    const r = await apiFetch(`/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...p, scanDate:new Date().toISOString(), usuario:currentUser!.nombre }) });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({} as any));
+      toast(d.message || "No se pudo registrar la unidad.", "error");
+      return false;
+    }
+    await fetchData();
+    return true;
   };
 
   const verificarGTINManual = async (gtin: string) => {
@@ -328,7 +372,7 @@ export default function InventoryApp() {
 
   const guardarProducto = async () => {
     const err = validarFechaGS1(form.exp); setExpError(err); if (err) return;
-    if (!form.gtin || !form.lot) { toast("GTIN y Lote son obligatorios.", "error"); return; }
+    if (!form.gtin || !form.lot || !form.exp) { toast("GTIN, Lote y Vencimiento son obligatorios.", "error"); return; }
     if (!productoExiste && (!form.nombre || !form.seccion)) { toast("Nombre y Sección son obligatorios para clasificar.", "error"); return; }
     if (!productoExiste || isAdmin) {
       await apiFetch(`/producto`, { method:"POST", body: JSON.stringify({
@@ -346,7 +390,8 @@ export default function InventoryApp() {
         dias_uso_aprox: form.dias_uso_aprox,
       })});
     }
-    await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
+    const ok = await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
+    if (!ok) return;
     cerrarModal();
     if (form.seccion) { setActiveSection(form.seccion); setExpandedSections(prev => new Set([...prev, form.seccion])); }
   };
