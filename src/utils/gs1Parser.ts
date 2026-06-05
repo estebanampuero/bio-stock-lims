@@ -3,13 +3,61 @@
 // GTIN solo (EAN-13 / UPC-A / ITF-14 / GTIN-14). Tolerante a parciales: devuelve
 // lo que pueda extraer (GTIN siempre presente si matchea); null solo si no hay nada.
 
-export type ScanFormat = "GS1-parens" | "GS1-raw" | "GTIN" | "desconocido";
-
 export interface BioRadProduct {
   gtin: string;
   lot: string;
   expiration: string; // GS1 AAMMDD tal cual viene; "" si no hay
-  format?: ScanFormat;
+  format?: string;    // "GS1-parens" | "GS1-raw" | "GTIN" | "custom:<nombre>" | "desconocido"
+}
+
+// ── Formatos personalizados (regex) administrados desde el panel ───────────────
+export interface ScanFormatRule {
+  id?: string;
+  nombre: string;
+  gtin_regex: string;
+  lot_regex?: string;
+  exp_regex?: string;
+  exp_formato?: string; // AAMMDD | AAAAMMDD | DDMMAA | DDMMAAAA | MMDDAA
+  prioridad?: number;
+}
+
+let CUSTOM_FORMATS: ScanFormatRule[] = [];
+
+export function setCustomScanFormats(formats: ScanFormatRule[]): void {
+  CUSTOM_FORMATS = [...(formats || [])].sort((a, b) => (a.prioridad ?? 100) - (b.prioridad ?? 100));
+}
+
+// Aplica una regex y devuelve el grupo de captura 1 (o el match completo).
+export function matchRegex(regex: string | undefined, text: string): string {
+  if (!regex) return "";
+  try { const m = text.match(new RegExp(regex)); return (m && (m[1] ?? m[0])) || ""; }
+  catch { return ""; }
+}
+
+// Normaliza una fecha capturada al formato interno AAMMDD (YYMMDD).
+export function normalizeExp(value: string, formato = "AAMMDD"): string {
+  const d = (value || "").replace(/\D/g, "");
+  switch ((formato || "AAMMDD").toUpperCase()) {
+    case "AAAAMMDD": return d.length >= 8 ? d.slice(2, 8) : d.slice(0, 6);
+    case "DDMMAA":   return d.length >= 6 ? d.slice(4, 6) + d.slice(2, 4) + d.slice(0, 2) : d;
+    case "DDMMAAAA": return d.length >= 8 ? d.slice(6, 8) + d.slice(2, 4) + d.slice(0, 2) : d;
+    case "MMDDAA":   return d.length >= 6 ? d.slice(4, 6) + d.slice(0, 2) + d.slice(2, 4) : d;
+    case "AAMMDD":
+    default:         return d.slice(0, 6);
+  }
+}
+
+// Aplica los formatos personalizados (por prioridad). Un formato matchea si su
+// regex de GTIN extrae algo; lote y vencimiento son opcionales.
+export function applyCustomFormat(code: string, formats: ScanFormatRule[] = CUSTOM_FORMATS): BioRadProduct | null {
+  for (const f of formats) {
+    const gtin = matchRegex(f.gtin_regex, code);
+    if (!gtin) continue;
+    const lot = matchRegex(f.lot_regex, code);
+    const expRaw = matchRegex(f.exp_regex, code);
+    return { gtin, lot, expiration: expRaw ? normalizeExp(expRaw, f.exp_formato) : "", format: `custom:${f.nombre}` };
+  }
+  return null;
 }
 
 // ── Estrategia A: GS1 con paréntesis  (01)...(17)...(10)... ────────────────────
@@ -70,5 +118,6 @@ export function parseGS1(codigo: string): BioRadProduct | null {
   if (!codigo) return null;
   const code = codigo.trim();
   if (!code) return null;
-  return parseGS1Parens(code) || parseGS1Raw(code) || parseGTINOnly(code) || null;
+  // Los formatos personalizados (del panel) tienen prioridad sobre los built-in.
+  return applyCustomFormat(code) || parseGS1Parens(code) || parseGS1Raw(code) || parseGTINOnly(code) || null;
 }

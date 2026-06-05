@@ -6,7 +6,7 @@ import {
   Search, X, Phone, Plus, Upload, Printer, LayoutGrid,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LabelList } from "recharts";
-import { parseGS1 } from "../utils/gs1Parser";
+import { parseGS1, setCustomScanFormats } from "../utils/gs1Parser";
 import { apiFetch, setToken, TOKEN_KEY, USER_KEY } from "../lib/api";
 import { formatExp, validarFechaGS1, getEstado, fmtDT } from "../lib/format";
 import { RolBadge, EstadoBadge, TempBadge } from "./shared/Badges";
@@ -237,6 +237,12 @@ export default function InventoryApp() {
   };
 
   useEffect(() => { fetchData(); const id = setInterval(fetchData, 3000); return () => clearInterval(id); }, [currentUser]);
+
+  // Cargar los formatos de escáner configurables (del panel) para que el parser los use
+  useEffect(() => {
+    if (!currentUser) return;
+    apiFetch("/scan-formats").then(r => r.ok ? r.json() : []).then(setCustomScanFormats).catch(() => {});
+  }, [currentUser]);
 
   // Por default mostramos TODAS las secciones (incluyendo cajas sin clasificar).
   // El usuario filtra explícitamente con los chips si quiere ver una sola sección.

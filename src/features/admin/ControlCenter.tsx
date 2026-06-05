@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense, type ReactNode } from "react";
 import {
   LayoutDashboard, Users, Package, FlaskConical, Layers, FileText,
-  Phone, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2,
+  Phone, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2, ScanLine,
 } from "lucide-react";
 import { useTheme } from "./hooks/useTheme";
 import { Breadcrumbs } from "./components/Breadcrumbs";
@@ -19,12 +19,13 @@ const SeccionesView   = lazy(() => import("./views/SeccionesView").then(m => ({ 
 const ProtocolosView  = lazy(() => import("./views/ProtocolosView").then(m => ({ default: m.ProtocolosView })));
 const AnexosView      = lazy(() => import("./views/AnexosView").then(m => ({ default: m.AnexosView })));
 const LogsView        = lazy(() => import("./views/LogsView").then(m => ({ default: m.LogsView })));
+const FormatosView    = lazy(() => import("./views/FormatosView").then(m => ({ default: m.FormatosView })));
 const SecurityView    = lazy(() => import("./views/SecurityView").then(m => ({ default: m.SecurityView })));
 const PapeleraView    = lazy(() => import("./views/PapeleraView").then(m => ({ default: m.PapeleraView })));
 
 type Section =
   | "dashboard" | "usuarios" | "inventario" | "maestro" | "secciones"
-  | "protocolos" | "anexos" | "logs" | "security" | "papelera";
+  | "protocolos" | "anexos" | "formatos" | "logs" | "security" | "papelera";
 
 interface NavItem {
   id: Section;
@@ -42,6 +43,7 @@ const NAV: NavItem[] = [
   { id: "secciones",  label: "Secciones",  icon: <Layers size={15}/>,          group: "operations", description: "Áreas del laboratorio" },
   { id: "protocolos", label: "Protocolos", icon: <FileText size={15}/>,        group: "operations", description: "SOPs del laboratorio" },
   { id: "anexos",     label: "Anexos",     icon: <Phone size={15}/>,           group: "operations", description: "Directorio telefónico" },
+  { id: "formatos",   label: "Formatos de escáner", icon: <ScanLine size={15}/>, group: "operations", description: "Reglas de códigos de barras" },
 
   { id: "usuarios",   label: "Usuarios",   icon: <Users size={15}/>,           group: "data",       description: "Personal del laboratorio" },
   { id: "logs",       label: "Auditoría",  icon: <ClipboardList size={15}/>,   group: "data",       description: "Registro completo de eventos" },
@@ -99,6 +101,7 @@ export function ControlCenter({ currentUser, onExit, onToast }: {
           {section === "secciones"  && <SeccionesView tokens={tokens} />}
           {section === "protocolos" && <ProtocolosView tokens={tokens} />}
           {section === "anexos"     && <AnexosView tokens={tokens} />}
+          {section === "formatos"   && <FormatosView tokens={tokens} onAction={(m, k) => onToast(m, k ?? "info")} />}
           {section === "logs"       && <LogsView tokens={tokens} />}
           {section === "security"   && <SecurityView tokens={tokens} />}
           {section === "papelera"   && <PapeleraView tokens={tokens} onAction={onToast} />}

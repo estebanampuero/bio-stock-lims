@@ -285,6 +285,24 @@ async function runMigrations(db) {
     await db.exec(`DROP TABLE IF EXISTS pii_access_log`);
     await db.exec("PRAGMA user_version = 15"); v = 15;
   }
+  // v16: Formatos de escáner configurables (regex) — config global de la plataforma
+  if (v < 16) {
+    await db.exec(`CREATE TABLE IF NOT EXISTS scan_formats (
+      id          TEXT PRIMARY KEY,
+      nombre      TEXT NOT NULL,
+      descripcion TEXT,
+      gtin_regex  TEXT NOT NULL,
+      lot_regex   TEXT,
+      exp_regex   TEXT,
+      exp_formato TEXT DEFAULT 'AAMMDD',
+      prioridad   INTEGER DEFAULT 100,
+      activo      INTEGER DEFAULT 1,
+      creado_por  TEXT,
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL
+    )`);
+    await db.exec("PRAGMA user_version = 16"); v = 16;
+  }
 }
 
 // ── PIN admin por defecto: 1234 con must_change_pin obligatorio ─────────────
@@ -853,6 +871,60 @@ v1.delete("/usuarios/:id", authenticate, authorize("ADMIN"), async (req, res) =>
     if (!user) return res.status(404).json({ success: false, message: "No encontrado" });
     await db.run("UPDATE usuarios SET fecha_baja = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
     await registrarLog(req.user.nombre, "ELIMINAR USUARIO (SOFT)", `${user.nombre} (${user.rol})`, getIP(req));
+    res.json({ success: true });
+  } catch (e) { errRes(res, e); }
+});
+
+// ── SCAN FORMATS (formatos de escáner configurables, globales) ────────────────
+function validarRegexCampos({ gtin_regex, lot_regex, exp_regex }) {
+  for (const [k, rx] of [["gtin", gtin_regex], ["lote", lot_regex], ["vencimiento", exp_regex]]) {
+    if (rx) { try { new RegExp(rx); } catch (e) { return `Regex de ${k} inválida: ${e.message}`; } }
+  }
+  return null;
+}
+
+// Lectura para todos los clientes autenticados (el parser los aplica)
+v1.get("/scan-formats", authenticate, async (req, res) => {
+  try { res.json(await db.all("SELECT * FROM scan_formats WHERE activo = 1 ORDER BY prioridad ASC, nombre ASC")); }
+  catch (e) { errRes(res, e); }
+});
+// Lista completa (incl. inactivos) — para el panel admin
+v1.get("/scan-formats/all", authenticate, authorize("ADMIN"), async (req, res) => {
+  try { res.json(await db.all("SELECT * FROM scan_formats ORDER BY prioridad ASC, nombre ASC")); }
+  catch (e) { errRes(res, e); }
+});
+v1.post("/scan-formats", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const { nombre, descripcion, gtin_regex, lot_regex, exp_regex, exp_formato, prioridad, activo } = req.body;
+    if (!nombre || !gtin_regex) return res.status(400).json({ success: false, message: "Nombre y regex de GTIN obligatorios" });
+    const errRx = validarRegexCampos({ gtin_regex, lot_regex, exp_regex });
+    if (errRx) return res.status(400).json({ success: false, message: errRx });
+    const id = randomUUID(); const now = new Date().toISOString();
+    await db.run(`INSERT INTO scan_formats (id, nombre, descripcion, gtin_regex, lot_regex, exp_regex, exp_formato, prioridad, activo, creado_por, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, nombre, descripcion || "", gtin_regex, lot_regex || "", exp_regex || "", exp_formato || "AAMMDD", prioridad ?? 100, activo === 0 ? 0 : 1, req.user.nombre, now, now]);
+    await registrarLog(req.user.nombre, "NUEVO FORMATO ESCANER", nombre, getIP(req));
+    res.json({ success: true, id });
+  } catch (e) { errRes(res, e); }
+});
+v1.put("/scan-formats/:id", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const { nombre, descripcion, gtin_regex, lot_regex, exp_regex, exp_formato, prioridad, activo } = req.body;
+    if (!nombre || !gtin_regex) return res.status(400).json({ success: false, message: "Nombre y regex de GTIN obligatorios" });
+    const errRx = validarRegexCampos({ gtin_regex, lot_regex, exp_regex });
+    if (errRx) return res.status(400).json({ success: false, message: errRx });
+    await db.run(`UPDATE scan_formats SET nombre=?, descripcion=?, gtin_regex=?, lot_regex=?, exp_regex=?, exp_formato=?, prioridad=?, activo=?, updated_at=? WHERE id=?`,
+      [nombre, descripcion || "", gtin_regex, lot_regex || "", exp_regex || "", exp_formato || "AAMMDD", prioridad ?? 100, activo ? 1 : 0, new Date().toISOString(), req.params.id]);
+    await registrarLog(req.user.nombre, "EDITAR FORMATO ESCANER", nombre, getIP(req));
+    res.json({ success: true });
+  } catch (e) { errRes(res, e); }
+});
+v1.delete("/scan-formats/:id", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    const f = await db.get("SELECT nombre FROM scan_formats WHERE id = ?", [req.params.id]);
+    if (!f) return res.status(404).json({ success: false, message: "No encontrado" });
+    await db.run("DELETE FROM scan_formats WHERE id = ?", [req.params.id]);
+    await registrarLog(req.user.nombre, "ELIMINAR FORMATO ESCANER", f.nombre, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
 });

@@ -9,12 +9,13 @@ interface DiagRow {
   format: string;
 }
 
-const fmtColor: Record<string, string> = {
+const fmtColorMap: Record<string, string> = {
   "GS1-parens": "#059669",
   "GS1-raw": "#005a9c",
   "GTIN": "#d97706",
   "desconocido": "#dc2626",
 };
+const colorFor = (fmt: string) => fmt.startsWith("custom:") ? "#7c3aed" : (fmtColorMap[fmt] || "#64748b");
 
 // Modo diagnóstico: pistolea cualquier código y muestra el texto crudo + qué
 // entendió el parser. Sirve para validar cobertura y juntar muestras de formatos
@@ -74,7 +75,7 @@ export function ScanDiagnostic({ onClose }: { onClose: () => void }) {
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={i}>
-                    <td style={cell}><span style={{ background: (fmtColor[r.format] || "#64748b") + "22", color: fmtColor[r.format] || "#64748b", fontWeight: 700, fontSize: 10, padding: "2px 7px", borderRadius: 6 }}>{r.format}</span></td>
+                    <td style={cell}><span style={{ background: colorFor(r.format) + "22", color: colorFor(r.format), fontWeight: 700, fontSize: 10, padding: "2px 7px", borderRadius: 6 }}>{r.format}</span></td>
                     <td style={cell}>{r.gtin || "—"}</td>
                     <td style={cell}>{r.lot || "—"}</td>
                     <td style={cell}>{r.expiration || "—"}</td>
