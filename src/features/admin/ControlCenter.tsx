@@ -1,7 +1,7 @@
 import { useState, lazy, Suspense, type ReactNode } from "react";
 import {
   LayoutDashboard, Users, Package, FlaskConical, Layers, FileText,
-  Phone, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2, ScanLine,
+  Phone, ClipboardList, Shield, Moon, Sun, ArrowLeft, Trash2, ScanLine, Database,
 } from "lucide-react";
 import { useTheme } from "./hooks/useTheme";
 import { Breadcrumbs } from "./components/Breadcrumbs";
@@ -20,12 +20,13 @@ const ProtocolosView  = lazy(() => import("./views/ProtocolosView").then(m => ({
 const AnexosView      = lazy(() => import("./views/AnexosView").then(m => ({ default: m.AnexosView })));
 const LogsView        = lazy(() => import("./views/LogsView").then(m => ({ default: m.LogsView })));
 const FormatosView    = lazy(() => import("./views/FormatosView").then(m => ({ default: m.FormatosView })));
+const RespaldosView   = lazy(() => import("./views/RespaldosView").then(m => ({ default: m.RespaldosView })));
 const SecurityView    = lazy(() => import("./views/SecurityView").then(m => ({ default: m.SecurityView })));
 const PapeleraView    = lazy(() => import("./views/PapeleraView").then(m => ({ default: m.PapeleraView })));
 
 type Section =
   | "dashboard" | "usuarios" | "inventario" | "maestro" | "secciones"
-  | "protocolos" | "anexos" | "formatos" | "logs" | "security" | "papelera";
+  | "protocolos" | "anexos" | "formatos" | "logs" | "security" | "respaldos" | "papelera";
 
 interface NavItem {
   id: Section;
@@ -47,6 +48,7 @@ const NAV: NavItem[] = [
 
   { id: "usuarios",   label: "Usuarios",   icon: <Users size={15}/>,           group: "data",       description: "Personal del laboratorio" },
   { id: "logs",       label: "Auditoría",  icon: <ClipboardList size={15}/>,   group: "data",       description: "Registro completo de eventos" },
+  { id: "respaldos",  label: "Respaldos",  icon: <Database size={15}/>,        group: "data",       description: "Exportar base · backups" },
   { id: "security",   label: "Seguridad",  icon: <Shield size={15}/>,          group: "security",   description: "Eventos de seguridad" },
   { id: "papelera",   label: "Papelera",   icon: <Trash2 size={15}/>,          group: "security",   description: "Soft-deleted · restaurar o eliminar permanentemente" },
 ];
@@ -102,6 +104,7 @@ export function ControlCenter({ currentUser, onExit, onToast }: {
           {section === "protocolos" && <ProtocolosView tokens={tokens} />}
           {section === "anexos"     && <AnexosView tokens={tokens} />}
           {section === "formatos"   && <FormatosView tokens={tokens} onAction={(m, k) => onToast(m, k ?? "info")} />}
+          {section === "respaldos"  && <RespaldosView tokens={tokens} onAction={(m, k) => onToast(m, k ?? "info")} />}
           {section === "logs"       && <LogsView tokens={tokens} />}
           {section === "security"   && <SecurityView tokens={tokens} />}
           {section === "papelera"   && <PapeleraView tokens={tokens} onAction={onToast} />}

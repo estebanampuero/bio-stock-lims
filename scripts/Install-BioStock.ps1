@@ -12,6 +12,12 @@
     Puerto HTTP/HTTPS del servidor. Default: 3000
 .PARAMETER EnableTLS
     Genera un certificado autofirmado y configura HTTPS.
+.PARAMETER ImportDb
+    Ruta a un archivo .db exportado (desde "Respaldos > Descargar base de datos").
+    Si se indica, instala el sistema CON esos datos (inventario, usuarios, etc.).
+.EXAMPLE
+    .\Install-BioStock.ps1 -ImportDb C:\Users\Lab\Downloads\biostock_2026-06-05.db
+    Instala trayendo los datos que se cargaron durante las pruebas en la nube.
 .EXAMPLE
     .\Install-BioStock.ps1
     Instalacion basica.
@@ -25,6 +31,7 @@ param(
   [string]$InstallPath  = "C:\BioStock",
   [int]   $Port         = 3000,
   [switch]$EnableTLS,
+  [string]$ImportDb     = "",
   [string]$ServiceName  = "BioStock-API",
   [string]$EventSource  = "BioStock-LIMS"
 )
@@ -216,6 +223,19 @@ if (Test-Path $verifyScript) {
 # ── Arrancar servicio ──────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "Iniciando servicio..."
+# ── Importar base de datos traída desde la nube (si se indicó -ImportDb) ─────
+if ($ImportDb) {
+  if (Test-Path $ImportDb) {
+    $dbDest = Join-Path $InstallPath "inventario_biorad.db"
+    Remove-Item "$dbDest", "$dbDest-wal", "$dbDest-shm" -ErrorAction SilentlyContinue
+    Copy-Item -Path $ImportDb -Destination $dbDest -Force
+    Write-Host "[+] Base de datos importada desde: $ImportDb" -ForegroundColor Green
+    Write-Audit -Message "Base de datos importada desde $ImportDb" -Level Information -EventId 1002
+  } else {
+    Write-Host "ADVERTENCIA: -ImportDb '$ImportDb' no existe. Se omite la importacion." -ForegroundColor Yellow
+  }
+}
+
 Start-Service -Name $ServiceName
 Start-Sleep -Seconds 4
 

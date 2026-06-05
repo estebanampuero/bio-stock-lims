@@ -1027,6 +1027,19 @@ v1.post("/admin/backups/run", authenticate, authorize("ADMIN"), async (req, res)
   } catch (e) { errRes(res, e); }
 });
 
+// Exportar/descargar la base completa como un único archivo SQLite consistente
+// (VACUUM INTO → snapshot limpio). Para llevar los datos al instalar on-premise.
+v1.get("/admin/export-db", authenticate, authorize("ADMIN"), async (req, res) => {
+  try {
+    if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const tmp = path.join(BACKUPS_DIR, `export_${ts}.db`);
+    await db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
+    await registrarLog(req.user.nombre, "EXPORTAR DB", `biostock_${ts}.db`, getIP(req));
+    res.download(tmp, `biostock_${ts}.db`, () => { fs.unlink(tmp, () => {}); });
+  } catch (e) { errRes(res, e); }
+});
+
 // ── ADMIN: métricas agregadas para el Control Center ─────────────────────────
 v1.get("/admin/dashboard", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
