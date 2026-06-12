@@ -4,6 +4,7 @@ import {
   UserPlus, ClipboardList, ScanLine, ChevronDown, ChevronRight,
   FlaskConical, Pencil, Trash2, BookOpen, FileText, FilePlus,
   Search, X, Phone, Plus, Upload, Printer, LayoutGrid,
+  PackageMinus, Layers, AlertTriangle, Minus,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, LabelList } from "recharts";
 import { parseGS1, setCustomScanFormats } from "../utils/gs1Parser";
@@ -143,6 +144,17 @@ export default function InventoryApp() {
 
   // ─ Auto-fill por nombre (independiente de GTIN/lote)
   const [autofilled, setAutofilled] = useState(false);
+
+  // ── Ingreso por cantidad: toggle + mini-modal ────────────────────────────────
+  const [modoCantidad, setModoCantidad] = useState(false);
+  const [qtyModal, setQtyModal] = useState<{ gtin:string; lot:string; expiration:string; nombre:string; seccion:string } | null>(null);
+  const [qtyValue, setQtyValue] = useState(1);
+
+  // ── Módulo de salida (descuento en lote) ─────────────────────────────────────
+  type SalidaLine = { gtin:string; lot:string; expiration:string; nombre:string; cantidad:number; disponible:number; fifoWarn:{ lot:string; expiration:string }|null };
+  const [salidaCart, setSalidaCart] = useState<SalidaLine[]>([]);
+  const salidaInputRef = useRef<HTMLInputElement>(null);
+  const [salidaBusy, setSalidaBusy] = useState(false);
   const buscarPorNombre = async (nombre: string) => {
     const n = nombre.trim();
     if (!n) return;
@@ -249,17 +261,26 @@ export default function InventoryApp() {
 
 
   // ── Scanner global ───────────────────────────────────────────────────────────
+  // Dispatcher refrescado en cada render → siempre ve el estado actual (view,
+  // inventory, carrito, modoCantidad) sin re-bindear el listener de teclado.
+  const scanDispatchRef = useRef<(code: string) => void>(() => {});
+  useEffect(() => {
+    scanDispatchRef.current = (code: string) => {
+      if (view === "Salida") procesarSalidaScan(code);
+      else procesarEscaneo(code);
+    };
+  });
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!currentUser || !canInventario) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
       setLaserActive(true); setTimeout(() => setLaserActive(false), 500);
-      if (e.key === "Enter") { if (barcodeBuffer.current.length > 5) procesarEscaneo(barcodeBuffer.current); barcodeBuffer.current = ""; }
+      if (e.key === "Enter") { if (barcodeBuffer.current.length > 5) scanDispatchRef.current(barcodeBuffer.current); barcodeBuffer.current = ""; }
       else if (e.key.length === 1) barcodeBuffer.current += e.key;
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [currentUser, activeSection, canInventario]);
+  }, [currentUser, canInventario]);
 
   // ── Flujo inventario ─────────────────────────────────────────────────────────
   const procesarEscaneo = async (code: string) => {
@@ -300,12 +321,102 @@ export default function InventoryApp() {
       return;
     }
 
+    // Modo "Pistolear cantidad" activo → abrir mini-modal para definir N unidades
+    if (modoCantidad) {
+      setQtyValue(1);
+      setQtyModal({ gtin, lot, expiration, nombre: existe.nombre, seccion: existe.seccion });
+      return;
+    }
+
     const ok = await registrarEnDB({ gtin, lot, expiration });
     if (ok) {
       toast(`Unidad agregada: ${existe.nombre}`, "success");
       setActiveSection(existe.seccion);
       setExpandedSections(prev => new Set([...prev, existe.seccion]));
     }
+  };
+
+  // Confirmar ingreso por cantidad desde el mini-modal
+  const confirmarCantidad = async () => {
+    if (!qtyModal) return;
+    const n = Math.max(1, Math.min(Math.floor(qtyValue) || 1, 1000));
+    const r = await apiFetch(`/inventario`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({
+      gtin: qtyModal.gtin, lot: qtyModal.lot, expiration: qtyModal.expiration,
+      scanDate: new Date().toISOString(), usuario: currentUser!.nombre, cantidad: n,
+    }) });
+    if (!r.ok) { const d = await r.json().catch(()=>({} as any)); toast(d.message || "No se pudo registrar.", "error"); return; }
+    await fetchData();
+    toast(`${n} ${n===1?"unidad agregada":"unidades agregadas"}: ${qtyModal.nombre}`, "success");
+    setActiveSection(qtyModal.seccion);
+    setExpandedSections(prev => new Set([...prev, qtyModal.seccion]));
+    setQtyModal(null);
+  };
+
+  // ── Módulo de salida: procesar escaneo → arma/actualiza carrito ──────────────
+  const procesarSalidaScan = async (code: string) => {
+    const parsed = parseGS1(code);
+    const gtin = parsed?.gtin || code.replace(/\D/g, "").slice(-14) || code;
+    let lot = parsed?.lot || "";
+    let expiration = parsed?.expiration || "";
+
+    // Stock activo del producto (todos los lotes) tomado del inventario en memoria
+    const delProducto = inventory.filter(i => i.gtin === gtin);
+    if (delProducto.length === 0) { toast("Ese insumo no tiene stock activo.", "error"); return; }
+
+    // Si el código no trae lote, y hay un único lote activo, usarlo
+    if (!lot) {
+      const lotes = [...new Set(delProducto.map(i => i.lot))];
+      if (lotes.length === 1) { lot = lotes[0]; expiration = delProducto[0].expiration; }
+      else { toast("El código no trae lote y hay varios. Pistolea un código con lote.", "error"); return; }
+    }
+
+    const delLote = delProducto.filter(i => i.lot === lot);
+    if (delLote.length === 0) { toast(`El lote ${lot} no tiene stock activo de este insumo.`, "error"); return; }
+    if (!expiration) expiration = delLote[0].expiration;
+    const nombre = delLote[0].nombre || delProducto[0].nombre || "Sin clasificar";
+    const disponible = delLote.length;
+
+    // Alarma FIFO: ¿existe otro lote activo del mismo insumo con vencimiento ANTERIOR?
+    const anteriores = delProducto
+      .filter(i => i.lot !== lot && i.expiration && i.expiration < expiration)
+      .sort((a, b) => a.expiration.localeCompare(b.expiration));
+    const fifoWarn = anteriores.length ? { lot: anteriores[0].lot, expiration: anteriores[0].expiration } : null;
+
+    setSalidaCart(prev => {
+      const idx = prev.findIndex(l => l.gtin === gtin && l.lot === lot);
+      if (idx >= 0) {
+        const next = [...prev];
+        const cur = next[idx];
+        next[idx] = { ...cur, cantidad: Math.min(cur.cantidad + 1, disponible), disponible, fifoWarn };
+        return next;
+      }
+      return [...prev, { gtin, lot, expiration, nombre, cantidad: 1, disponible, fifoWarn }];
+    });
+  };
+
+  const setSalidaQty = (gtin: string, lot: string, cantidad: number) =>
+    setSalidaCart(prev => prev.map(l => l.gtin === gtin && l.lot === lot
+      ? { ...l, cantidad: Math.max(1, Math.min(Math.floor(cantidad) || 1, l.disponible)) } : l));
+
+  const quitarSalida = (gtin: string, lot: string) =>
+    setSalidaCart(prev => prev.filter(l => !(l.gtin === gtin && l.lot === lot)));
+
+  const confirmarSalida = async () => {
+    if (salidaCart.length === 0) return;
+    setSalidaBusy(true);
+    try {
+      const r = await apiFetch(`/inventario/salida`, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ items: salidaCart.map(l => ({ gtin: l.gtin, lot: l.lot, cantidad: l.cantidad })) }) });
+      const d = await r.json().catch(()=>({} as any));
+      if (!r.ok) {
+        if (d.insuficientes?.length) toast(`Stock insuficiente: ${d.insuficientes.map((x:any)=>`lote ${x.lot} (pide ${x.pedido}, hay ${x.disponible})`).join("; ")}`, "error");
+        else toast(d.message || "No se pudo descontar.", "error");
+        return;
+      }
+      toast(`Salida registrada: ${d.descontados} ${d.descontados===1?"unidad descontada":"unidades descontadas"}.`, "success");
+      setSalidaCart([]);
+      await fetchData();
+    } finally { setSalidaBusy(false); }
   };
 
   const handleModalScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -740,6 +851,7 @@ export default function InventoryApp() {
 
         <nav style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:14 }}>
           {canInventario && <button onClick={()=>setView("Dashboard")} style={navBtn(view==="Dashboard")}><LayoutDashboard size={14}/> Inventario</button>}
+          {canInventario && <button onClick={()=>setView("Salida")} style={navBtn(view==="Salida")}><PackageMinus size={14}/> Salida de Insumos</button>}
           {canProtocolos && <button onClick={()=>setView("Protocolos")} style={navBtn(view==="Protocolos")}><FileText size={14}/> Protocolos</button>}
           <button onClick={()=>setView("Anexos")} style={navBtn(view==="Anexos")}><Phone size={14}/> Anexos Telefónicos</button>
           {canInventario && <button onClick={()=>setShowScanDiag(true)} style={navBtn(false)}><ScanLine size={14}/> Diagnóstico escáner</button>}
@@ -758,6 +870,12 @@ export default function InventoryApp() {
                 letterSpacing: 0.3,
               }}>
               <LayoutGrid size={14}/> CONTROL CENTER
+            </button>
+          )}
+          {canInventario && view==="Dashboard" && (
+            <button onClick={()=>setModoCantidad(v=>!v)} title="Al pistolear un insumo conocido, pregunta cuántas unidades sumar en vez de sumar 1"
+              style={{ padding:"10px", background: modoCantidad ? "linear-gradient(135deg,#7c3aed,#6d28d9)" : "rgba(124,58,237,0.08)", color: modoCantidad ? "white" : "#6d28d9", border: modoCantidad ? "none" : "1px solid rgba(124,58,237,0.3)", borderRadius:10, marginTop:6, cursor:"pointer", fontWeight:800, display:"flex", alignItems:"center", justifyContent:"center", gap:7, fontSize:"12.5px", boxShadow: modoCantidad ? "0 4px 14px rgba(124,58,237,0.35)" : "none" }}>
+              <Layers size={14}/> Pistolear cantidad: {modoCantidad ? "ON" : "OFF"}
             </button>
           )}
           {canInventario && (
@@ -991,6 +1109,81 @@ export default function InventoryApp() {
                 </div>
             }
           </>
+          );
+        })()}
+
+        {/* ─── SALIDA DE INSUMOS ─────────────────────────────────────────────── */}
+        {view === "Salida" && canInventario && (() => {
+          const totalUnidades = salidaCart.reduce((s, l) => s + l.cantidad, 0);
+          const hayAlarmas = salidaCart.some(l => l.fifoWarn);
+          return (
+          <div style={{ maxWidth:1000 }}>
+            <SectionHead title="Salida de Insumos" icon={<PackageMinus/>} />
+            <p style={{ fontSize:"13px", color:"#64748b", margin:"0 0 16px" }}>
+              Pistolea cada insumo que quieras descontar. Cada escaneo suma 1 unidad del lote leído (editable).
+              Cuando termines, presiona <b>Aceptar y descontar</b>.
+            </p>
+
+            {/* Campo de escaneo dedicado */}
+            <div style={{ ...glass, padding:16, marginBottom:16, display:"flex", alignItems:"center", gap:10 }}>
+              <ScanLine size={20} style={{ color:"#005a9c", flexShrink:0 }}/>
+              <input ref={salidaInputRef} autoFocus placeholder="Apunte el escáner aquí y pistolee los insumos a descontar…"
+                onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); const c=salidaInputRef.current?.value||""; if(salidaInputRef.current) salidaInputRef.current.value=""; if(c.length>=5) procesarSalidaScan(c); } }}
+                style={{ ...inp, background:"white", flex:1 }}/>
+            </div>
+
+            {hayAlarmas && (
+              <div style={{ background:"rgba(245,158,11,0.1)", border:"1px solid rgba(245,158,11,0.35)", borderRadius:10, padding:"10px 14px", marginBottom:14, display:"flex", alignItems:"center", gap:9, color:"#b45309", fontSize:"12.5px", fontWeight:700 }}>
+                <AlertTriangle size={16}/> Hay insumos con un lote de vencimiento anterior aún en stock. Revisa la columna ALARMA antes de descontar (FIFO).
+              </div>
+            )}
+
+            {salidaCart.length === 0
+              ? <div style={{ ...glass, padding:50, textAlign:"center", color:"#94a3b8" }}><PackageMinus size={40} style={{ opacity:0.2, marginBottom:12 }}/><p style={{ fontWeight:700, margin:0 }}>Carrito de salida vacío</p><p style={{ fontSize:"13px", margin:"8px 0 0" }}>Pistolea un insumo para comenzar</p></div>
+              : <div style={{ ...glass, overflow:"hidden" }}>
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"13px" }}>
+                    <thead><tr style={{ background:"rgba(0,90,156,0.05)" }}>{["INSUMO","LOTE","VENCIMIENTO","DISP.","CANTIDAD","ALARMA FIFO",""].map(h=><th key={h} style={{ padding:"12px 14px", fontWeight:800, color:"#005a9c", fontSize:"11px", textAlign:"left", whiteSpace:"nowrap" }}>{h}</th>)}</tr></thead>
+                    <tbody>
+                      {salidaCart.map(l => (
+                        <tr key={`${l.gtin}||${l.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                          <td style={{ padding:"10px 14px", fontWeight:700, color:"#1e293b" }}>{l.nombre}</td>
+                          <td style={{ padding:"10px 14px", fontFamily:"'Roboto Mono',monospace", color:"#475569" }}>{l.lot}</td>
+                          <td style={{ padding:"10px 14px", color:"#334155", whiteSpace:"nowrap" }}>{formatExp(l.expiration)}</td>
+                          <td style={{ padding:"10px 14px", color:"#64748b", fontWeight:700 }}>{l.disponible}</td>
+                          <td style={{ padding:"10px 14px" }}>
+                            <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+                              <button onClick={()=>setSalidaQty(l.gtin,l.lot,l.cantidad-1)} style={{ width:26, height:26, borderRadius:7, border:"1px solid rgba(0,0,0,0.1)", background:"white", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", color:"#475569" }}><Minus size={13}/></button>
+                              <input type="number" min={1} max={l.disponible} value={l.cantidad} onChange={e=>setSalidaQty(l.gtin,l.lot,parseInt(e.target.value))}
+                                style={{ width:52, textAlign:"center", padding:"5px 4px", border:"1px solid rgba(0,0,0,0.12)", borderRadius:7, fontWeight:800, color:"#005a9c", fontFamily:"'Roboto Mono',monospace" }}/>
+                              <button onClick={()=>setSalidaQty(l.gtin,l.lot,l.cantidad+1)} disabled={l.cantidad>=l.disponible} style={{ width:26, height:26, borderRadius:7, border:"1px solid rgba(0,0,0,0.1)", background:"white", cursor:l.cantidad>=l.disponible?"not-allowed":"pointer", opacity:l.cantidad>=l.disponible?0.4:1, display:"flex", alignItems:"center", justifyContent:"center", color:"#475569" }}><Plus size={13}/></button>
+                            </div>
+                          </td>
+                          <td style={{ padding:"10px 14px" }}>
+                            {l.fifoWarn
+                              ? <span style={{ display:"inline-flex", alignItems:"center", gap:5, color:"#b45309", background:"rgba(245,158,11,0.12)", border:"1px solid rgba(245,158,11,0.3)", padding:"4px 8px", borderRadius:7, fontWeight:700, fontSize:"11px", whiteSpace:"nowrap" }}><AlertTriangle size={12}/> Vence antes: lote {l.fifoWarn.lot} ({formatExp(l.fifoWarn.expiration)})</span>
+                              : <span style={{ color:"#cbd5e1" }}>—</span>}
+                          </td>
+                          <td style={{ padding:"10px 14px" }}>
+                            <button onClick={()=>quitarSalida(l.gtin,l.lot)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Trash2 size={11}/></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderTop:"1px solid rgba(0,0,0,0.06)", background:"rgba(0,90,156,0.02)" }}>
+                    <div style={{ fontSize:"13px", color:"#475569", fontWeight:700 }}>
+                      Total a descontar: <span style={{ color:"#005a9c", fontWeight:800 }}>{totalUnidades}</span> {totalUnidades===1?"unidad":"unidades"} · {salidaCart.length} {salidaCart.length===1?"insumo":"insumos"}
+                    </div>
+                    <div style={{ display:"flex", gap:10 }}>
+                      <button onClick={()=>setSalidaCart([])} style={{ padding:"10px 16px", background:"rgba(0,0,0,0.04)", color:"#475569", border:"1px solid rgba(0,0,0,0.1)", borderRadius:10, fontWeight:700, cursor:"pointer", fontSize:"13px" }}>Vaciar</button>
+                      <button onClick={confirmarSalida} disabled={salidaBusy} style={{ padding:"10px 20px", background: salidaBusy ? "#94a3b8" : "linear-gradient(135deg,#dc2626,#b91c1c)", color:"white", border:"none", borderRadius:10, fontWeight:800, cursor:salidaBusy?"wait":"pointer", fontSize:"13px", display:"flex", alignItems:"center", gap:8, boxShadow:"0 4px 14px rgba(220,38,38,0.3)" }}>
+                        <PackageMinus size={15}/> {salidaBusy ? "Descontando…" : "Aceptar y descontar"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+            }
+          </div>
           );
         })()}
 
@@ -1238,6 +1431,35 @@ export default function InventoryApp() {
 
       {/* ══ MODAL: Clasificar control ════════════════════════════════════════ */}
       {showScanDiag && <ScanDiagnostic onClose={()=>setShowScanDiag(false)} />}
+
+      {/* Mini-modal: ingreso por cantidad */}
+      {qtyModal && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.65)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:3100 }} onClick={()=>setQtyModal(null)}>
+          <div style={{ ...glass, background:"rgba(255,255,255,0.97)", padding:28, width:420 }} onClick={e=>e.stopPropagation()}>
+            <h3 style={{ marginTop:0, color:"#005a9c", fontSize:"17px", fontWeight:800, display:"flex", alignItems:"center", gap:8 }}><Layers size={18}/> Ingresar cantidad</h3>
+            <div style={{ background:"rgba(0,90,156,0.04)", borderRadius:10, padding:"12px 14px", marginBottom:16 }}>
+              <div style={{ fontWeight:800, color:"#1e293b", fontSize:"14px", marginBottom:6 }}>{qtyModal.nombre}</div>
+              <div style={{ display:"flex", gap:16, fontSize:"12px", color:"#64748b" }}>
+                <span>Lote: <b style={{ fontFamily:"'Roboto Mono',monospace", color:"#475569" }}>{qtyModal.lot}</b></span>
+                <span>Vence: <b style={{ color:"#475569" }}>{formatExp(qtyModal.expiration)}</b></span>
+              </div>
+            </div>
+            <label style={{ fontSize:"12px", fontWeight:800, color:"#64748b", display:"block", marginBottom:8 }}>UNIDADES A SUMAR</label>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:20 }}>
+              <button onClick={()=>setQtyValue(v=>Math.max(1,v-1))} style={{ width:38, height:38, borderRadius:9, border:"1px solid rgba(0,0,0,0.1)", background:"white", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", color:"#475569" }}><Minus size={16}/></button>
+              <input type="number" min={1} max={1000} autoFocus value={qtyValue}
+                onChange={e=>setQtyValue(Math.max(1,Math.min(parseInt(e.target.value)||1,1000)))}
+                onKeyDown={e=>{ if(e.key==="Enter") confirmarCantidad(); }}
+                style={{ flex:1, textAlign:"center", padding:"9px", border:"1px solid rgba(0,0,0,0.14)", borderRadius:9, fontWeight:800, fontSize:"18px", color:"#005a9c", fontFamily:"'Roboto Mono',monospace" }}/>
+              <button onClick={()=>setQtyValue(v=>Math.min(1000,v+1))} style={{ width:38, height:38, borderRadius:9, border:"1px solid rgba(0,0,0,0.1)", background:"white", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", color:"#475569" }}><Plus size={16}/></button>
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={()=>setQtyModal(null)} style={{ flex:1, padding:"11px", background:"rgba(0,0,0,0.04)", color:"#475569", border:"1px solid rgba(0,0,0,0.1)", borderRadius:10, fontWeight:700, cursor:"pointer", fontSize:"13px" }}>Cancelar</button>
+              <button onClick={confirmarCantidad} style={{ flex:2, padding:"11px", background:"#005a9c", color:"white", border:"none", borderRadius:10, fontWeight:800, cursor:"pointer", fontSize:"13px", display:"flex", alignItems:"center", justifyContent:"center", gap:7, boxShadow:"0 4px 14px rgba(0,90,156,0.3)" }}><Plus size={15}/> Agregar {qtyValue} {qtyValue===1?"unidad":"unidades"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,0.65)", backdropFilter:"blur(10px)", display:"flex", justifyContent:"center", alignItems:"center", zIndex:3000 }}>

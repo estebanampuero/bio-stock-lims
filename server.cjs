@@ -575,11 +575,18 @@ v1.post("/inventario", authenticate, canInv, async (req, res) => {
   try {
     const { gtin, lot, expiration, scanDate } = req.body;
     if (!gtin || !lot || !expiration) return res.status(400).json({ success: false, message: "Faltan campos" });
-    const id = randomUUID();
-    await db.run("INSERT INTO inventario (id, gtin, lot, expiration, scanDate, usuario) VALUES (?, ?, ?, ?, ?, ?)",
-      [id, gtin, lot, expiration, scanDate, req.user.nombre]);
-    await registrarLog(req.user.nombre, "INGRESO STOCK", `GTIN: ${gtin} | Lote: ${lot}`, getIP(req));
-    res.json({ success: true });
+    // cantidad opcional (default 1): inserta N unidades del mismo lote en una transacción
+    const n = Math.max(1, Math.min(parseInt(req.body.cantidad, 10) || 1, 1000));
+    await db.exec("BEGIN");
+    try {
+      for (let i = 0; i < n; i++) {
+        await db.run("INSERT INTO inventario (id, gtin, lot, expiration, scanDate, usuario) VALUES (?, ?, ?, ?, ?, ?)",
+          [randomUUID(), gtin, lot, expiration, scanDate, req.user.nombre]);
+      }
+      await db.exec("COMMIT");
+    } catch (e) { await db.exec("ROLLBACK"); throw e; }
+    await registrarLog(req.user.nombre, "INGRESO STOCK", `GTIN: ${gtin} | Lote: ${lot} | x${n}`, getIP(req));
+    res.json({ success: true, cantidad: n });
   } catch (e) { errRes(res, e); }
 });
 v1.patch("/inventario/:id", authenticate, canInv, async (req, res) => {
@@ -590,6 +597,54 @@ v1.patch("/inventario/:id", authenticate, canInv, async (req, res) => {
     await registrarLog(req.user.nombre, "BAJA STOCK", `GTIN: ${item.gtin} | Lote: ${item.lot}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
+});
+// Salida en lote: descuenta (soft-delete) N unidades del lote exacto de cada insumo.
+// body: { items: [{ gtin, lot, cantidad }] }. Atómico: si algún insumo no tiene
+// stock suficiente, no se descuenta nada y se reportan los faltantes.
+v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0)
+      return res.status(400).json({ success: false, message: "items debe ser un array no vacío" });
+
+    const norm = [];
+    for (const it of items) {
+      const gtin = String(it.gtin || "").trim();
+      const lot  = String(it.lot  || "").trim();
+      const cant = Math.max(1, Math.min(parseInt(it.cantidad, 10) || 1, 1000));
+      if (!gtin || !lot) return res.status(400).json({ success: false, message: "Cada item requiere gtin y lot" });
+      norm.push({ gtin, lot, cant });
+    }
+
+    // Validar stock disponible por (gtin, lot) ANTES de tocar nada
+    const insuficientes = [];
+    for (const n of norm) {
+      const row = await db.get("SELECT COUNT(*) AS c FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL", [n.gtin, n.lot]);
+      if (row.c < n.cant) insuficientes.push({ gtin: n.gtin, lot: n.lot, pedido: n.cant, disponible: row.c });
+    }
+    if (insuficientes.length)
+      return res.status(409).json({ success: false, message: "Stock insuficiente en uno o más insumos", insuficientes });
+
+    const now = new Date().toISOString();
+    let total = 0;
+    await db.exec("BEGIN");
+    try {
+      for (const n of norm) {
+        const rows = await db.all(
+          "SELECT id FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL ORDER BY expiration ASC, scanDate ASC LIMIT ?",
+          [n.gtin, n.lot, n.cant]);
+        for (const r of rows) {
+          await db.run("UPDATE inventario SET fecha_baja = ? WHERE id = ?", [now, r.id]);
+          total++;
+        }
+      }
+      await db.exec("COMMIT");
+    } catch (e) { await db.exec("ROLLBACK"); throw e; }
+
+    for (const n of norm)
+      await registrarLog(req.user.nombre, "SALIDA STOCK", `GTIN: ${n.gtin} | Lote: ${n.lot} | x${n.cant}`, getIP(req));
+    res.json({ success: true, descontados: total });
+  } catch (e) { errRes(res, e, "Error en salida de stock"); }
 });
 // Bulk import: recibe array de productos (maestro_productos), inserta en transacción.
 // Cada fila: { gtin, nombre, detalle?, pack?, seccion, temperatura?, preparacion? }
