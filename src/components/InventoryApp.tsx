@@ -32,6 +32,7 @@ const EMPTY_PREP = {
 const EMPTY_FORM: ProductForm = {
   gtin: "", lot: "", exp: "", nombre: "", abreviado: "", detalle: "",
   seccion: "", pack: "", temperatura: "Refrigerado", preparacion: "",
+  min_stock: 0,
   ...EMPTY_PREP,
 };
 
@@ -55,6 +56,25 @@ const navBtn = (active: boolean): React.CSSProperties => ({
   transition: "all 0.18s", boxShadow: active ? "0 4px 12px rgba(0,90,156,0.25)" : "none",
   width: "100%",
 });
+
+// Tarjeta de sección de alertas (tabla o mensaje de vacío)
+function AlertSection({ title, color, empty, rows, cols }: { title: string; color: string; empty: string; rows: React.ReactNode[]; cols: string[] }) {
+  return (
+    <div style={{ ...glass, overflow: "hidden", marginBottom: 16 }}>
+      <div style={{ padding: "12px 16px", borderLeft: `4px solid ${color}`, fontWeight: 800, color: "#1e293b", fontSize: "13px", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: color, display: "inline-block" }} /> {title}
+        <span style={{ marginLeft: "auto", fontSize: "12px", color: "#94a3b8", fontWeight: 700 }}>{rows.length}</span>
+      </div>
+      {rows.length === 0
+        ? <div style={{ padding: "18px 16px", color: "#94a3b8", fontSize: "13px" }}>{empty}</div>
+        : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+            <thead><tr style={{ background: "rgba(0,0,0,0.02)" }}>{cols.map(c => <th key={c} style={{ padding: "9px 14px", textAlign: "left", fontSize: "11px", fontWeight: 800, color: "#64748b", whiteSpace: "nowrap" }}>{c}</th>)}</tr></thead>
+            <tbody>{rows}</tbody>
+          </table>}
+    </div>
+  );
+}
+
 // ── Componente principal ──────────────────────────────────────────────────────
 
 export default function InventoryApp() {
@@ -155,6 +175,27 @@ export default function InventoryApp() {
   const [salidaCart, setSalidaCart] = useState<SalidaLine[]>([]);
   const salidaInputRef = useRef<HTMLInputElement>(null);
   const [salidaBusy, setSalidaBusy] = useState(false);
+
+  // ── Alertas y reportes (vencimiento + stock mínimo, ISO 15189 §6.6) ──────────
+  type AlertaLote = { gtin:string; lot:string; expiration:string; vencimiento:string; nombre:string; abreviado:string; seccion:string; cantidad:number; dias:number; criticidad?:string };
+  type AlertaProd = { gtin:string; nombre:string; seccion:string; min_stock:number; cantidad:number };
+  const [alertas, setAlertas] = useState<{ vencidos:AlertaLote[]; porVencer:AlertaLote[]; stockBajo:AlertaProd[]; resumen:{ vencidos:number; porVencer:number; stockBajo:number } }>(
+    { vencidos:[], porVencer:[], stockBajo:[], resumen:{ vencidos:0, porVencer:0, stockBajo:0 } });
+
+  const descargarCSV = async (tipo: string) => {
+    try {
+      const r = await apiFetch(`/export/csv?tipo=${tipo}`);
+      if (!r.ok) { toast("No se pudo exportar el reporte.", "error"); return; }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${tipo}_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast("Reporte descargado.", "success");
+    } catch (_) { toast("Error al exportar.", "error"); }
+  };
+
   const buscarPorNombre = async (nombre: string) => {
     const n = nombre.trim();
     if (!n) return;
@@ -181,6 +222,7 @@ export default function InventoryApp() {
         cantidad_alicuotas: m.cantidad_alicuotas !== undefined ? m.cantidad_alicuotas : f.cantidad_alicuotas,
         volumen_ul: m.volumen_ul !== undefined ? m.volumen_ul : f.volumen_ul,
         dias_uso_aprox: m.dias_uso_aprox !== undefined ? m.dias_uso_aprox : f.dias_uso_aprox,
+        min_stock: m.min_stock !== undefined ? m.min_stock : f.min_stock,
       }));
       setAutofilled(true);
     } catch (_) {}
@@ -233,14 +275,16 @@ export default function InventoryApp() {
   const fetchData = async () => {
     if (!currentUser) return;
     try {
-      const [inv, cfg, lg, prot, anx] = await Promise.all([
+      const [inv, cfg, lg, prot, anx, alr] = await Promise.all([
         apiFetch(`/inventario`),
         apiFetch(`/config`),
         apiFetch(`/logs`),
         apiFetch(`/protocolos`),
         apiFetch(`/anexos`),
+        apiFetch(`/inventario/alertas`),
       ]);
       if (inv.ok)  setInventory(await inv.json());
+      if (alr.ok)  setAlertas(await alr.json());
       if (cfg.ok)  { const d = await cfg.json(); setSecciones(d.secciones.filter((s:any) => s.nombre)); setUsuarios(d.usuarios); }
       if (lg.ok)   { const d = await lg.json(); setLogs(Array.isArray(d) ? d : d.rows || []); }
       if (prot.ok) setProtocolos(await prot.json());
@@ -315,6 +359,7 @@ export default function InventoryApp() {
         temperatura: existe.almacenamiento_sin_abrir || existe.temperatura || "Refrigerado",
         preparacion: existe.preparacion || "",
         almacenamiento_sin_abrir: existe.almacenamiento_sin_abrir || existe.temperatura || "",
+        min_stock: existe.min_stock ?? 0,
       });
       setGtinLocked(true); setExpError(null); setProductoExiste(true); setShowModal(true);
       toast("El código no incluye lote/vencimiento. Complétalo para sumar la unidad.", "info");
@@ -444,6 +489,7 @@ export default function InventoryApp() {
         cantidad_alicuotas: existe.cantidad_alicuotas ?? null,
         volumen_ul: existe.volumen_ul ?? null,
         dias_uso_aprox: existe.dias_uso_aprox ?? null,
+        min_stock: existe.min_stock ?? 0,
       }));
       setProductoExiste(true); setAutofilled(true);
     } else {
@@ -482,6 +528,7 @@ export default function InventoryApp() {
         cantidad_alicuotas: existe.cantidad_alicuotas ?? null,
         volumen_ul: existe.volumen_ul ?? null,
         dias_uso_aprox: existe.dias_uso_aprox ?? null,
+        min_stock: existe.min_stock ?? 0,
       }));
       setProductoExiste(true); setAutofilled(true);
     } else { setProductoExiste(false); setAutofilled(false); }
@@ -507,6 +554,7 @@ export default function InventoryApp() {
         cantidad_alicuotas: form.cantidad_alicuotas,
         volumen_ul: form.volumen_ul,
         dias_uso_aprox: form.dias_uso_aprox,
+        min_stock: form.min_stock,
       })});
     }
     const ok = await registrarEnDB({ gtin:form.gtin, lot:form.lot, expiration:form.exp });
@@ -531,6 +579,7 @@ export default function InventoryApp() {
       cantidad_alicuotas: g.cantidad_alicuotas ?? null,
       volumen_ul: g.volumen_ul ?? null,
       dias_uso_aprox: g.dias_uso_aprox ?? null,
+      min_stock: g.min_stock ?? 0,
       newLot: g.lot, newExp: g.expiration,
     });
     setShowEditModal(true);
@@ -552,6 +601,7 @@ export default function InventoryApp() {
       cantidad_alicuotas: editForm.cantidad_alicuotas,
       volumen_ul: editForm.volumen_ul,
       dias_uso_aprox: editForm.dias_uso_aprox,
+      min_stock: editForm.min_stock,
     })});
     if (editForm.newLot !== editTarget.lot || editForm.newExp !== editTarget.expiration) {
       await apiFetch(`/inventario/lote`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ gtin:editTarget.gtin, lotActual:editTarget.lot, nuevoLot:editForm.newLot, nuevaExp:editForm.newExp, usuario:currentUser!.nombre }) });
@@ -787,6 +837,7 @@ export default function InventoryApp() {
       cantidad_alicuotas: item.cantidad_alicuotas ?? null,
       volumen_ul: item.volumen_ul ?? null,
       dias_uso_aprox: item.dias_uso_aprox ?? null,
+      min_stock: item.min_stock ?? 0,
       cantidad: 0, itemIds: [],
     };
     groupMap[key].cantidad++; groupMap[key].itemIds.push(item.id);
@@ -852,6 +903,16 @@ export default function InventoryApp() {
         <nav style={{ display:"flex", flexDirection:"column", gap:4, marginBottom:14 }}>
           {canInventario && <button onClick={()=>setView("Dashboard")} style={navBtn(view==="Dashboard")}><LayoutDashboard size={14}/> Inventario</button>}
           {canInventario && <button onClick={()=>setView("Salida")} style={navBtn(view==="Salida")}><PackageMinus size={14}/> Salida de Insumos</button>}
+          {canInventario && (() => {
+            const totalAlertas = alertas.resumen.vencidos + alertas.resumen.porVencer + alertas.resumen.stockBajo;
+            const urgentes = alertas.resumen.vencidos + alertas.resumen.stockBajo;
+            return (
+              <button onClick={()=>setView("Alertas")} style={{ ...navBtn(view==="Alertas"), justifyContent:"space-between" }}>
+                <span style={{ display:"flex", alignItems:"center", gap:8 }}><AlertTriangle size={14}/> Alertas y Reportes</span>
+                {totalAlertas > 0 && <span style={{ background: urgentes>0 ? "#dc2626" : "#f59e0b", color:"white", fontSize:"10px", fontWeight:800, borderRadius:999, padding:"1px 7px", minWidth:18, textAlign:"center" }}>{totalAlertas}</span>}
+              </button>
+            );
+          })()}
           {canProtocolos && <button onClick={()=>setView("Protocolos")} style={navBtn(view==="Protocolos")}><FileText size={14}/> Protocolos</button>}
           <button onClick={()=>setView("Anexos")} style={navBtn(view==="Anexos")}><Phone size={14}/> Anexos Telefónicos</button>
           {canInventario && <button onClick={()=>setShowScanDiag(true)} style={navBtn(false)}><ScanLine size={14}/> Diagnóstico escáner</button>}
@@ -1187,6 +1248,69 @@ export default function InventoryApp() {
           );
         })()}
 
+        {/* ─── ALERTAS Y REPORTES ────────────────────────────────────────────── */}
+        {view === "Alertas" && canInventario && (
+          <div style={{ maxWidth:1000 }}>
+            <SectionHead title="Alertas y Reportes" icon={<AlertTriangle/>} />
+
+            {/* Exportar reportes */}
+            <div style={{ ...glass, padding:16, marginBottom:18 }}>
+              <div style={{ fontSize:"11px", fontWeight:800, color:"#005a9c", letterSpacing:"0.5px", marginBottom:10 }}>EXPORTAR REPORTES (CSV)</div>
+              <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                {[["inventario","Inventario completo"],["vencimientos","Vencimientos"],["movimientos","Movimientos (ingresos/salidas)"]].map(([t,label])=>(
+                  <button key={t} onClick={()=>descargarCSV(t)} style={{ display:"flex", alignItems:"center", gap:7, padding:"10px 16px", background:"#005a9c", color:"white", border:"none", borderRadius:10, fontWeight:700, cursor:"pointer", fontSize:"12.5px", boxShadow:"0 4px 14px rgba(0,90,156,0.25)" }}>
+                    <Upload size={14}/> {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Resumen */}
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:18 }}>
+              {[["Vencidos",alertas.resumen.vencidos,"#dc2626"],["Por vencer (≤90d)",alertas.resumen.porVencer,"#f59e0b"],["Stock bajo",alertas.resumen.stockBajo,"#ea580c"]].map(([l,n,c])=>(
+                <div key={l as string} style={{ ...glass, padding:16, borderLeft:`4px solid ${c}` }}>
+                  <div style={{ fontSize:"11px", color:"#64748b", fontWeight:700, marginBottom:4 }}>{l as string}</div>
+                  <div style={{ fontSize:"26px", fontWeight:800, color:c as string }}>{n as number}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Vencidos */}
+            <AlertSection title="Vencidos — retirar del stock" color="#dc2626" empty="Sin productos vencidos 🎉" rows={alertas.vencidos.map(v=>(
+              <tr key={`${v.gtin}|${v.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                <td style={{ padding:"10px 14px", fontWeight:700, color:"#1e293b" }}>{v.nombre}</td>
+                <td style={{ padding:"10px 14px", fontFamily:"'Roboto Mono',monospace", color:"#475569" }}>{v.lot}</td>
+                <td style={{ padding:"10px 14px", color:"#dc2626", fontWeight:700 }}>{v.vencimiento}</td>
+                <td style={{ padding:"10px 14px", color:"#dc2626", fontWeight:800 }}>{Math.abs(v.dias)} días</td>
+                <td style={{ padding:"10px 14px", fontWeight:700 }}>{v.cantidad}</td>
+                <td style={{ padding:"10px 14px", color:"#64748b" }}>{v.seccion}</td>
+              </tr>
+            ))} cols={["INSUMO","LOTE","VENCIÓ","HACE","CANT.","SECCIÓN"]} />
+
+            {/* Por vencer */}
+            <AlertSection title="Por vencer (≤90 días)" color="#f59e0b" empty="Nada por vencer en 90 días" rows={alertas.porVencer.map(v=>(
+              <tr key={`${v.gtin}|${v.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                <td style={{ padding:"10px 14px", fontWeight:700, color:"#1e293b" }}>{v.nombre}</td>
+                <td style={{ padding:"10px 14px", fontFamily:"'Roboto Mono',monospace", color:"#475569" }}>{v.lot}</td>
+                <td style={{ padding:"10px 14px", color:"#475569", fontWeight:700 }}>{v.vencimiento}</td>
+                <td style={{ padding:"10px 14px" }}><span style={{ fontWeight:800, color: v.criticidad==="critico" ? "#dc2626" : "#d97706" }}>{v.dias} días</span></td>
+                <td style={{ padding:"10px 14px" }}>{v.criticidad==="critico" ? <span style={{ fontSize:"11px", fontWeight:800, color:"#dc2626", background:"rgba(220,38,38,0.1)", padding:"3px 8px", borderRadius:6 }}>CRÍTICO</span> : <span style={{ fontSize:"11px", fontWeight:700, color:"#d97706", background:"rgba(245,158,11,0.12)", padding:"3px 8px", borderRadius:6 }}>AVISO</span>}</td>
+                <td style={{ padding:"10px 14px", fontWeight:700 }}>{v.cantidad}</td>
+              </tr>
+            ))} cols={["INSUMO","LOTE","VENCE","EN","ESTADO","CANT."]} />
+
+            {/* Stock bajo */}
+            <AlertSection title="Stock bajo (bajo el mínimo)" color="#ea580c" empty="Todo el stock sobre el mínimo" rows={alertas.stockBajo.map(p=>(
+              <tr key={p.gtin} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                <td style={{ padding:"10px 14px", fontWeight:700, color:"#1e293b" }}>{p.nombre}</td>
+                <td style={{ padding:"10px 14px", color:"#64748b" }}>{p.seccion}</td>
+                <td style={{ padding:"10px 14px" }}><span style={{ fontWeight:800, color:"#ea580c" }}>{p.cantidad}</span> <span style={{ color:"#94a3b8" }}>/ {p.min_stock} mín.</span></td>
+                <td style={{ padding:"10px 14px", color:"#dc2626", fontWeight:700 }}>Faltan {p.min_stock - p.cantidad}</td>
+              </tr>
+            ))} cols={["INSUMO","SECCIÓN","STOCK / MÍN.","DÉFICIT"]} />
+          </div>
+        )}
+
         {/* ─── ANEXOS TELEFÓNICOS ───────────────────────────────────────────── */}
         {view === "Anexos" && (
           <div style={{ maxWidth:900 }}>
@@ -1508,6 +1632,10 @@ export default function InventoryApp() {
                       </div>
                       <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={form.detalle} onChange={e=>setForm(f=>({...f,detalle:e.target.value}))} placeholder="[cantidad] x [ml]" style={inp}/></div>
                     </div>
+                    <div>
+                      <div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>STOCK MÍNIMO (alerta) — 0 = sin alerta</div>
+                      <input type="number" min={0} value={form.min_stock ?? 0} onChange={e=>setForm(f=>({...f, min_stock: Math.max(0, parseInt(e.target.value)||0)}))} placeholder="ej: 5" style={inp}/>
+                    </div>
 
                     {/* ─── PREPARACIÓN ESTRUCTURADA (8 campos) ─── */}
                     <div style={{ background:"rgba(0,90,156,0.04)", border:"1px solid rgba(0,90,156,0.12)", borderRadius:10, padding:14, marginTop:4 }}>
@@ -1656,9 +1784,10 @@ export default function InventoryApp() {
                   <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>SECCIÓN</div><input list="sec-edit" value={editForm.seccion} onChange={e=>setEditForm(f=>({...f,seccion:e.target.value}))} style={inp}/><datalist id="sec-edit">{secciones.map(s=><option key={s.nombre} value={s.nombre}/>)}</datalist></div>
                   <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>ALMACEN. SIN ABRIR</div><select value={editForm.almacenamiento_sin_abrir || editForm.temperatura} onChange={e=>setEditForm(f=>({...f,almacenamiento_sin_abrir:e.target.value as any, temperatura:e.target.value}))} style={inp}><option value="">— Seleccionar —</option><option>Refrigerado</option><option>Congelado</option><option>Ambiente</option></select></div>
                 </div>
-                <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:10 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr", gap:10 }}>
                   <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>DETALLE</div><input value={editForm.detalle} onChange={e=>setEditForm(f=>({...f,detalle:e.target.value}))} style={inp}/></div>
                   <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>AUTONOMÍA (días/u)</div><input type="number" min="0" value={editForm.dias_uso_aprox ?? ""} onChange={e=>setEditForm(f=>({...f,dias_uso_aprox: e.target.value === "" ? null : parseInt(e.target.value, 10) || 0}))} style={inp}/></div>
+                  <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>STOCK MÍN.</div><input type="number" min="0" value={editForm.min_stock ?? 0} onChange={e=>setEditForm(f=>({...f,min_stock: Math.max(0, parseInt(e.target.value)||0)}))} style={inp}/></div>
                 </div>
                 <div><div style={{ fontSize:"10px", fontWeight:700, color:"#64748b", marginBottom:3 }}>NOTAS DE PREPARACIÓN</div><textarea value={editForm.preparacion} onChange={e=>setEditForm(f=>({...f,preparacion:e.target.value}))} rows={3} style={{ ...inp, resize:"vertical", lineHeight:1.5 }}/></div>
               </div>

@@ -10,14 +10,14 @@ export interface User {
 export interface InvRow extends Partial<PrepFields> {
   id: string; gtin: string; lot: string; expiration: string; usuario: string;
   nombre?: string; abreviado?: string; detalle?: string; seccion?: string;
-  temperatura?: string; preparacion?: string;
+  temperatura?: string; preparacion?: string; min_stock?: number | null;
 }
 
 export interface GroupedItem extends Partial<PrepFields> {
   gtin: string; lot: string; nombre: string; abreviado: string;
   detalle: string; seccion: string;
   expiration: string; temperatura: string; preparacion: string;
-  cantidad: number; itemIds: string[];
+  cantidad: number; itemIds: string[]; min_stock?: number | null;
 }
 
 export interface Protocolo {
@@ -50,6 +50,7 @@ export interface ProductForm extends PrepFields {
   nombre: string; abreviado: string;
   detalle: string; seccion: string; pack: string;
   temperatura: string; preparacion: string;
+  min_stock: number | null;                  // umbral para alerta de stock bajo
 }
 
 export interface MaestroRow extends PrepFields {

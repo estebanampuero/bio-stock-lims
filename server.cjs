@@ -303,6 +303,11 @@ async function runMigrations(db) {
     )`);
     await db.exec("PRAGMA user_version = 16"); v = 16;
   }
+  // v17: stock mínimo por producto (umbral para alertas de stock bajo)
+  if (v < 17) {
+    await db.exec(`ALTER TABLE maestro_productos ADD COLUMN min_stock INTEGER DEFAULT 0`);
+    await db.exec("PRAGMA user_version = 17"); v = 17;
+  }
 }
 
 // ── PIN admin por defecto: 1234 con must_change_pin obligatorio ─────────────
@@ -564,7 +569,7 @@ v1.get("/inventario", authenticate, async (req, res) => {
         m.nombre, m.abreviado, m.detalle, m.pack, m.seccion, m.temperatura, m.preparacion,
         m.almacenamiento_sin_abrir, m.descongelar_min, m.reconstituir,
         m.tiempo_reconstitucion_min, m.temperatura_post_reconstitucion,
-        m.duracion_dias, m.cantidad_alicuotas, m.volumen_ul, m.dias_uso_aprox
+        m.duracion_dias, m.cantidad_alicuotas, m.volumen_ul, m.dias_uso_aprox, m.min_stock
       FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
       WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')
       ORDER BY i.expiration ASC`);
@@ -764,6 +769,92 @@ v1.delete("/anexos/:id", authenticate, authorize("ADMIN"), async (req, res) => {
   } catch (e) { errRes(res, e); }
 });
 
+// ── ALERTAS Y REPORTES (ISO 15189 §6.6: vencimiento + stock mínimo) ──────────
+function diasAVencer(exp) {
+  if (!exp || !/^\d{6}$/.test(exp)) return null;
+  const y = 2000 + parseInt(exp.slice(0, 2), 10);
+  const m = parseInt(exp.slice(2, 4), 10) - 1;
+  const d = parseInt(exp.slice(4, 6), 10);
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+  return Math.floor((new Date(y, m, d).getTime() - hoy.getTime()) / 86400000);
+}
+function fmtExpServer(exp) {
+  if (!exp || !/^\d{6}$/.test(exp)) return exp || "—";
+  return `${exp.slice(4, 6)}/${exp.slice(2, 4)}/${2000 + parseInt(exp.slice(0, 2), 10)}`;
+}
+function csvCell(v) { const s = v == null ? "" : String(v); return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }
+function toCSV(headers, rows) {
+  const sep = ";"; // es-CL: Excel usa ; como separador
+  const head = headers.map(csvCell).join(sep);
+  const body = rows.map(r => r.map(csvCell).join(sep)).join("\n");
+  return "﻿" + head + "\n" + body; // BOM para que Excel respete UTF-8
+}
+
+const EXP_WARN_DAYS = 90, EXP_CRIT_DAYS = 30;
+
+v1.get("/inventario/alertas", authenticate, async (req, res) => {
+  try {
+    const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion, m.min_stock
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
+      WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
+    const lotes = {}, porProducto = {};
+    for (const r of rows) {
+      const k = r.gtin + "||" + r.lot;
+      if (!lotes[k]) lotes[k] = { gtin: r.gtin, lot: r.lot, expiration: r.expiration, vencimiento: fmtExpServer(r.expiration),
+        nombre: r.nombre || "Sin clasificar", abreviado: r.abreviado || "", seccion: r.seccion || "", cantidad: 0, dias: diasAVencer(r.expiration) };
+      lotes[k].cantidad++;
+      if (!porProducto[r.gtin]) porProducto[r.gtin] = { gtin: r.gtin, nombre: r.nombre || "Sin clasificar", seccion: r.seccion || "", min_stock: r.min_stock || 0, cantidad: 0 };
+      porProducto[r.gtin].cantidad++;
+    }
+    const arr = Object.values(lotes);
+    const vencidos = arr.filter(l => l.dias !== null && l.dias < 0).sort((a, b) => a.dias - b.dias);
+    const porVencer = arr.filter(l => l.dias !== null && l.dias >= 0 && l.dias <= EXP_WARN_DAYS)
+      .sort((a, b) => a.dias - b.dias).map(l => ({ ...l, criticidad: l.dias <= EXP_CRIT_DAYS ? "critico" : "aviso" }));
+    const stockBajo = Object.values(porProducto).filter(p => p.min_stock > 0 && p.cantidad < p.min_stock)
+      .sort((a, b) => (a.cantidad - a.min_stock) - (b.cantidad - b.min_stock));
+    res.json({ vencidos, porVencer, stockBajo, resumen: { vencidos: vencidos.length, porVencer: porVencer.length, stockBajo: stockBajo.length } });
+  } catch (e) { errRes(res, e); }
+});
+
+// Exportación CSV: tipo = inventario | vencimientos | movimientos
+v1.get("/export/csv", authenticate, async (req, res) => {
+  try {
+    const tipo = String(req.query.tipo || "inventario");
+    let filename = tipo, csv = "";
+    if (tipo === "inventario") {
+      const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion, m.min_stock
+        FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
+        WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
+      const g = {};
+      for (const r of rows) { const k = r.gtin + "||" + r.lot; if (!g[k]) g[k] = { ...r, cantidad: 0 }; g[k].cantidad++; }
+      const data = Object.values(g).sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+      csv = toCSV(["Producto", "Abreviado", "GTIN", "Lote", "Vencimiento", "Cantidad", "Seccion", "Estado", "Dias_a_vencer", "Stock_minimo"],
+        data.map(d => { const dias = diasAVencer(d.expiration); const estado = dias === null ? "-" : dias < 0 ? "VENCIDO" : dias <= EXP_WARN_DAYS ? "POR VENCER" : "ACTIVO";
+          return [d.nombre, d.abreviado || "", d.gtin, d.lot, fmtExpServer(d.expiration), d.cantidad, d.seccion || "", estado, dias ?? "", d.min_stock || 0]; }));
+    } else if (tipo === "vencimientos") {
+      const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion
+        FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
+        WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
+      const g = {};
+      for (const r of rows) { const k = r.gtin + "||" + r.lot; if (!g[k]) g[k] = { ...r, cantidad: 0, dias: diasAVencer(r.expiration) }; g[k].cantidad++; }
+      const data = Object.values(g).filter(d => d.dias !== null && d.dias <= EXP_WARN_DAYS).sort((a, b) => a.dias - b.dias);
+      csv = toCSV(["Producto", "GTIN", "Lote", "Vencimiento", "Dias_a_vencer", "Estado", "Cantidad", "Seccion"],
+        data.map(d => [d.nombre || "Sin clasificar", d.gtin, d.lot, fmtExpServer(d.expiration), d.dias, d.dias < 0 ? "VENCIDO" : d.dias <= EXP_CRIT_DAYS ? "CRITICO" : "POR VENCER", d.cantidad, d.seccion || ""]));
+    } else if (tipo === "movimientos") {
+      const rows = await db.all(`SELECT fecha, usuario, accion, detalles, ip FROM logs
+        WHERE accion IN ('INGRESO STOCK','SALIDA STOCK','BAJA STOCK','EDITAR LOTE','NUEVO MAESTRO','EDITAR MAESTRO')
+        ORDER BY fecha DESC LIMIT 10000`);
+      csv = toCSV(["Fecha", "Usuario", "Accion", "Detalles", "IP"], rows.map(r => [r.fecha, r.usuario, r.accion, r.detalles, r.ip || ""]));
+    } else {
+      return res.status(400).json({ success: false, message: "tipo inválido (inventario|vencimientos|movimientos)" });
+    }
+    await registrarLog(req.user.nombre, "EXPORTAR CSV", `Reporte: ${tipo}`, getIP(req));
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}_${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send(csv);
+  } catch (e) { errRes(res, e, "Error al exportar CSV"); }
+});
+
 // ── MAESTRO ────────────────────────────────────────────────────────────────
 v1.get("/producto/:gtin", authenticate, async (req, res) => {
   try {
@@ -804,7 +895,7 @@ v1.post("/producto", authenticate, canInv, async (req, res) => {
       gtin, nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
       almacenamiento_sin_abrir, descongelar_min, reconstituir,
       tiempo_reconstitucion_min, temperatura_post_reconstitucion,
-      duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox,
+      duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, min_stock,
     } = req.body;
     if (!gtin || !nombre || !seccion) return res.status(400).json({ success: false, message: "GTIN, nombre y sección obligatorios" });
     await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
@@ -814,14 +905,14 @@ v1.post("/producto", authenticate, canInv, async (req, res) => {
         gtin, nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
         almacenamiento_sin_abrir, descongelar_min, reconstituir,
         tiempo_reconstitucion_min, temperatura_post_reconstitucion,
-        duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, fecha_baja
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, min_stock, fecha_baja
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       [
         gtin, nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
         storage, descongelar_min ?? null, reconstituir || "No",
         tiempo_reconstitucion_min ?? null, temperatura_post_reconstitucion || null,
         duracion_dias ?? null, cantidad_alicuotas ?? null, volumen_ul ?? null,
-        dias_uso_aprox ?? null,
+        dias_uso_aprox ?? null, Math.max(0, parseInt(min_stock, 10) || 0),
       ]
     );
     await registrarLog(req.user.nombre, "NUEVO MAESTRO", `${nombre} → ${seccion} | GTIN: ${gtin}`, getIP(req));
@@ -835,7 +926,7 @@ v1.put("/producto/:gtin", authenticate, canInv, async (req, res) => {
       nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
       almacenamiento_sin_abrir, descongelar_min, reconstituir,
       tiempo_reconstitucion_min, temperatura_post_reconstitucion,
-      duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox,
+      duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, min_stock,
     } = req.body;
     await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
     const storage = almacenamiento_sin_abrir || temperatura || "Refrigerado";
@@ -844,14 +935,14 @@ v1.put("/producto/:gtin", authenticate, canInv, async (req, res) => {
         nombre=?, abreviado=?, detalle=?, pack=?, seccion=?, temperatura=?, preparacion=?,
         almacenamiento_sin_abrir=?, descongelar_min=?, reconstituir=?,
         tiempo_reconstitucion_min=?, temperatura_post_reconstitucion=?,
-        duracion_dias=?, cantidad_alicuotas=?, volumen_ul=?, dias_uso_aprox=?
+        duracion_dias=?, cantidad_alicuotas=?, volumen_ul=?, dias_uso_aprox=?, min_stock=?
         WHERE gtin=?`,
       [
         nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
         storage, descongelar_min ?? null, reconstituir || "No",
         tiempo_reconstitucion_min ?? null, temperatura_post_reconstitucion || null,
         duracion_dias ?? null, cantidad_alicuotas ?? null, volumen_ul ?? null,
-        dias_uso_aprox ?? null,
+        dias_uso_aprox ?? null, Math.max(0, parseInt(min_stock, 10) || 0),
         req.params.gtin,
       ]
     );
