@@ -904,8 +904,15 @@ export default function InventoryApp() {
 
       {/* ── SIDEBAR ──────────────────────────────────────────────────────────── */}
       <aside style={{ ...glass, width:272, margin:14, padding:"18px 14px", display:"flex", flexDirection:"column", boxSizing:"border-box", border:"1px solid rgba(255,255,255,0.8)", overflowY:"auto", flexShrink:0 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:9, color:"#005a9c", marginBottom:14 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:9, color:"#005a9c", marginBottom:4 }}>
           <Activity size={24} /><h2 style={{ margin:0, fontSize:18, fontWeight:800 }}>BIO-STOCK</h2>
+        </div>
+        {/* Organización activa (multi-tenant) */}
+        <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:14, paddingLeft:2 }}>
+          <span style={{ fontSize:"11px", fontWeight:800, color:"#475569", background:"rgba(0,90,156,0.08)", padding:"2px 8px", borderRadius:6, maxWidth:230, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={currentUser?.org?.nombre || ""}>
+            🏥 {currentUser?.org?.nombre || "Laboratorio"}
+          </span>
+          {currentUser?.org?.plan && currentUser.org.plan !== "free" && <span style={{ fontSize:"9px", fontWeight:800, color:"#7c3aed", background:"rgba(124,58,237,0.1)", padding:"2px 6px", borderRadius:5, textTransform:"uppercase" }}>{currentUser.org.plan}</span>}
         </div>
 
         {/* Indicador láser */}

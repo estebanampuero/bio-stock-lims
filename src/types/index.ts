@@ -1,10 +1,14 @@
 export type Rol = "ADMIN" | "TECNOLOGO" | "TECNICO";
 
+export interface Org { id: string; nombre: string; slug: string; plan: string }
+
 export interface User {
   id: string;
   nombre: string;
-  rol: Rol;
+  rol: Rol | "SUPER_ADMIN";
   must_change_pin?: boolean;
+  org_id?: string;
+  org?: Org | null;
 }
 
 export interface InvRow extends Partial<PrepFields> {

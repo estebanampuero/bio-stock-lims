@@ -116,6 +116,9 @@ function authenticate(req, res, next) {
   } catch (_) {
     return res.status(401).json({ success: false, message: "Token inválido o expirado" });
   }
+  // Multi-tenant (v19): tokens emitidos antes de la migración no llevan org_id.
+  // Caen a la org por defecto para no romper la sesión activa.
+  if (!req.user.org_id) req.user.org_id = "org_default";
   // Enforcement server-side del cambio de PIN obligatorio: con el PIN default no se
   // puede operar la API directamente, solo cambiar el PIN. (No basta el modal del cliente.)
   if (req.user.mustChangePin) {
@@ -315,6 +318,48 @@ async function runMigrations(db) {
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_inv_estado ON inventario(estado_aceptacion)`);
     await db.exec("PRAGMA user_version = 18"); v = 18;
   }
+  // v19: MULTI-TENANT. org_id en datos de negocio + tabla organizations.
+  // Todo lo existente se asigna a la org por defecto 'org_default' (backward-compatible).
+  // scan_formats queda GLOBAL (config de plataforma). usuarios.nombre sigue único global.
+  if (v < 19) {
+   // Atómico: si algo falla, ROLLBACK total → no se pierde maestro_productos.
+   await db.exec("BEGIN");
+   try {
+    await db.exec(`CREATE TABLE IF NOT EXISTS organizations (
+      id TEXT PRIMARY KEY, nombre TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+      plan TEXT DEFAULT 'free', created_at TEXT NOT NULL, fecha_baja TEXT DEFAULT NULL)`);
+    await db.run("INSERT OR IGNORE INTO organizations (id, nombre, slug, plan, created_at) VALUES ('org_default','Laboratorio','default','pro',?)", [new Date().toISOString()]);
+
+    for (const t of ["usuarios", "inventario", "logs", "anexos", "protocolos"]) {
+      await db.exec(`ALTER TABLE ${t} ADD COLUMN org_id TEXT NOT NULL DEFAULT 'org_default'`);
+      await db.exec(`CREATE INDEX IF NOT EXISTS idx_${t}_org ON ${t}(org_id)`);
+    }
+
+    // Rebuild secciones con PK compuesta (org_id, nombre) — cada org tiene sus secciones
+    await db.exec(`CREATE TABLE secciones_new (org_id TEXT NOT NULL DEFAULT 'org_default', nombre TEXT NOT NULL, PRIMARY KEY (org_id, nombre))`);
+    await db.exec(`INSERT INTO secciones_new (org_id, nombre) SELECT 'org_default', nombre FROM secciones`);
+    await db.exec(`DROP TABLE secciones`);
+    await db.exec(`ALTER TABLE secciones_new RENAME TO secciones`);
+
+    // Rebuild maestro_productos con PK compuesta (org_id, gtin) — dos orgs pueden tener el mismo GTIN
+    const cols = (await db.all("PRAGMA table_info(maestro_productos)")).map(c => c.name);
+    const colList = cols.join(", ");
+    await db.exec(`CREATE TABLE maestro_productos_new (
+      org_id TEXT NOT NULL DEFAULT 'org_default',
+      gtin TEXT NOT NULL, nombre TEXT, detalle TEXT, pack TEXT, seccion TEXT, temperatura TEXT,
+      preparacion TEXT, almacenamiento_sin_abrir TEXT, descongelar_min INTEGER, reconstituir TEXT,
+      tiempo_reconstitucion_min INTEGER, temperatura_post_reconstitucion TEXT, duracion_dias INTEGER,
+      cantidad_alicuotas INTEGER, volumen_ul INTEGER, fecha_baja TEXT, abreviado TEXT,
+      dias_uso_aprox INTEGER, min_stock INTEGER DEFAULT 0,
+      PRIMARY KEY (org_id, gtin))`);
+    await db.exec(`INSERT INTO maestro_productos_new (org_id, ${colList}) SELECT 'org_default', ${colList} FROM maestro_productos`);
+    await db.exec(`DROP TABLE maestro_productos`);
+    await db.exec(`ALTER TABLE maestro_productos_new RENAME TO maestro_productos`);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_maestro_org ON maestro_productos(org_id)`);
+    await db.exec("COMMIT");
+   } catch (e) { await db.exec("ROLLBACK"); throw e; }
+    await db.exec("PRAGMA user_version = 19"); v = 19;
+  }
 }
 
 // ── PIN admin por defecto: 1234 con must_change_pin obligatorio ─────────────
@@ -372,16 +417,33 @@ async function seedAdminFromEnv() {
   } catch (e) { console.error("Seed admin falló:", e.message); }
 }
 
+// Seed del SUPER_ADMIN de plataforma (gestiona organizaciones). Vive en org_default.
+async function seedSuperAdminFromEnv() {
+  const nombre = process.env.SEED_SUPERADMIN_USER;
+  const pass   = process.env.SEED_SUPERADMIN_PASS;
+  if (!nombre || !pass) return;
+  try {
+    const hash = await bcrypt.hash(pass, 10);
+    const existing = await db.get("SELECT id FROM usuarios WHERE nombre = ?", [nombre]);
+    if (existing) {
+      await db.run("UPDATE usuarios SET pin = ?, rol = 'SUPER_ADMIN', must_change_pin = 0, fecha_baja = NULL WHERE id = ?", [hash, existing.id]);
+    } else {
+      await db.run("INSERT INTO usuarios (id, nombre, rol, pin, must_change_pin, org_id) VALUES (?, ?, 'SUPER_ADMIN', ?, 0, 'org_default')", [randomUUID(), nombre, hash]);
+    }
+    console.log(`🛡️  SUPER_ADMIN sembrado desde env: ${nombre}`);
+  } catch (e) { console.error("Seed super-admin falló:", e.message); }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // LOGGING
 // ════════════════════════════════════════════════════════════════════════════
 
-async function registrarLog(usuario, accion, detalles, ip = "desconocida") {
+async function registrarLog(usuario, accion, detalles, ip = "desconocida", org = null) {
   try {
-    let perfil = "";
-    try { const u = await db.get("SELECT rol FROM usuarios WHERE nombre = ?", [usuario]); if (u) perfil = u.rol; } catch (_) {}
-    await db.run("INSERT INTO logs (usuario, perfil, accion, detalles, fecha, ip) VALUES (?, ?, ?, ?, ?, ?)",
-      [usuario, perfil, accion, detalles, new Date().toISOString(), ip]);
+    let perfil = "", orgId = org || "org_default";
+    try { const u = await db.get("SELECT rol, org_id FROM usuarios WHERE nombre = ?", [usuario]); if (u) { perfil = u.rol; if (!org && u.org_id) orgId = u.org_id; } } catch (_) {}
+    await db.run("INSERT INTO logs (usuario, perfil, accion, detalles, fecha, ip, org_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [usuario, perfil, accion, detalles, new Date().toISOString(), ip, orgId]);
   } catch (_) {}
 }
 
@@ -482,6 +544,7 @@ async function backupAlArranqueSiHaceFalta() {
   await runMigrations(db);
   await rotateDefaultAdminPin();
   await seedAdminFromEnv();
+  await seedSuperAdminFromEnv();
   console.log(`✅ BIO-STOCK API lista. DB: ${DB_PATH}`);
   await backupAlArranqueSiHaceFalta();
   programarBackupDiario();
@@ -522,14 +585,15 @@ v1.post("/login", loginLimiter, async (req, res) => {
       return res.status(429).json({ success: false, message: "Cuenta bloqueada temporalmente. Intente en 30 minutos." });
     }
 
-    const user = await db.get("SELECT id, nombre, rol, pin, must_change_pin FROM usuarios WHERE nombre = ? AND fecha_baja IS NULL", [nombre]);
+    const user = await db.get("SELECT id, nombre, rol, pin, must_change_pin, org_id FROM usuarios WHERE nombre = ? AND fecha_baja IS NULL", [nombre]);
     const valid = user && await bcrypt.compare(pin, user.pin);
     await registerLoginAttempt(nombre, !!valid);
 
     if (valid) {
-      const token = jwt.sign({ sub: user.id, nombre: user.nombre, rol: user.rol, mustChangePin: !!user.must_change_pin }, JWT_SECRET, { expiresIn: JWT_TTL });
+      const token = jwt.sign({ sub: user.id, nombre: user.nombre, rol: user.rol, org_id: user.org_id || "org_default", mustChangePin: !!user.must_change_pin }, JWT_SECRET, { expiresIn: JWT_TTL });
       await registrarLog(user.nombre, "LOGIN", `Sesión iniciada — rol: ${user.rol}`, ip);
-      res.json({ success: true, token, user: { id: user.id, nombre: user.nombre, rol: user.rol, must_change_pin: !!user.must_change_pin } });
+      const org = await db.get("SELECT id, nombre, slug, plan FROM organizations WHERE id = ?", [user.org_id || "org_default"]);
+      res.json({ success: true, token, user: { id: user.id, nombre: user.nombre, rol: user.rol, org_id: user.org_id || "org_default", org, must_change_pin: !!user.must_change_pin } });
     } else {
       await registrarLog(nombre || "?", "LOGIN FALLIDO", "Acceso denegado", ip);
       res.status(401).json({ success: false, message: "Usuario o PIN incorrecto" });
@@ -544,9 +608,10 @@ v1.post("/logout", authenticate, async (req, res) => {
 
 v1.get("/me", authenticate, async (req, res) => {
   try {
-    const u = await db.get("SELECT id, nombre, rol, must_change_pin FROM usuarios WHERE id = ?", [req.user.sub]);
+    const u = await db.get("SELECT id, nombre, rol, must_change_pin, org_id FROM usuarios WHERE id = ?", [req.user.sub]);
     if (!u) return res.status(404).json({ success: false, message: "Usuario no encontrado" });
-    res.json({ id: u.id, nombre: u.nombre, rol: u.rol, must_change_pin: !!u.must_change_pin });
+    const org = await db.get("SELECT id, nombre, slug, plan FROM organizations WHERE id = ?", [u.org_id]);
+    res.json({ id: u.id, nombre: u.nombre, rol: u.rol, must_change_pin: !!u.must_change_pin, org_id: u.org_id, org });
   } catch (e) { errRes(res, e); }
 });
 
@@ -562,7 +627,7 @@ v1.post("/cambiar-pin", authenticate, async (req, res) => {
     await db.run("UPDATE usuarios SET pin = ?, must_change_pin = 0 WHERE id = ?", [hash, req.user.sub]);
     await registrarLog(req.user.nombre, "CAMBIO PIN", "PIN actualizado", getIP(req));
     // Token fresco sin el flag mustChangePin para que el usuario pueda operar sin re-login.
-    const token = jwt.sign({ sub: req.user.sub, nombre: req.user.nombre, rol: req.user.rol, mustChangePin: false }, JWT_SECRET, { expiresIn: JWT_TTL });
+    const token = jwt.sign({ sub: req.user.sub, nombre: req.user.nombre, rol: req.user.rol, org_id: req.user.org_id, mustChangePin: false }, JWT_SECRET, { expiresIn: JWT_TTL });
     res.json({ success: true, token });
   } catch (e) { errRes(res, e); }
 });
@@ -572,19 +637,21 @@ const canInv = authorize("ADMIN", "TECNOLOGO");
 
 v1.get("/inventario", authenticate, async (req, res) => {
   try {
+    const org = req.user.org_id;
     const rows = await db.all(`SELECT i.*,
         m.nombre, m.abreviado, m.detalle, m.pack, m.seccion, m.temperatura, m.preparacion,
         m.almacenamiento_sin_abrir, m.descongelar_min, m.reconstituir,
         m.tiempo_reconstitucion_min, m.temperatura_post_reconstitucion,
         m.duracion_dias, m.cantidad_alicuotas, m.volumen_ul, m.dias_uso_aprox, m.min_stock
-      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-      WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')
-      ORDER BY i.expiration ASC`);
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+      WHERE i.org_id = ? AND i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')
+      ORDER BY i.expiration ASC`, [org]);
     res.json(rows);
   } catch (e) { errRes(res, e); }
 });
 v1.post("/inventario", authenticate, canInv, async (req, res) => {
   try {
+    const org = req.user.org_id;
     const { gtin, lot, expiration, scanDate } = req.body;
     if (!gtin || !lot || !expiration) return res.status(400).json({ success: false, message: "Faltan campos" });
     // cantidad opcional (default 1): inserta N unidades del mismo lote en una transacción
@@ -592,14 +659,14 @@ v1.post("/inventario", authenticate, canInv, async (req, res) => {
     // Aceptación de lote (ISO 15189 §6.6.3): si el lote ya tiene unidades aceptadas,
     // las nuevas heredan ACEPTADO; si es un lote nuevo, quedan PENDIENTE de aceptación.
     const yaAceptado = await db.get(
-      "SELECT 1 FROM inventario WHERE gtin = ? AND lot = ? AND estado_aceptacion = 'ACEPTADO' AND fecha_baja IS NULL LIMIT 1",
-      [gtin, lot]);
+      "SELECT 1 FROM inventario WHERE org_id = ? AND gtin = ? AND lot = ? AND estado_aceptacion = 'ACEPTADO' AND fecha_baja IS NULL LIMIT 1",
+      [org, gtin, lot]);
     const estado = yaAceptado ? "ACEPTADO" : "PENDIENTE";
     await db.exec("BEGIN");
     try {
       for (let i = 0; i < n; i++) {
-        await db.run("INSERT INTO inventario (id, gtin, lot, expiration, scanDate, usuario, estado_aceptacion) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [randomUUID(), gtin, lot, expiration, scanDate, req.user.nombre, estado]);
+        await db.run("INSERT INTO inventario (id, gtin, lot, expiration, scanDate, usuario, estado_aceptacion, org_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [randomUUID(), gtin, lot, expiration, scanDate, req.user.nombre, estado, org]);
       }
       await db.exec("COMMIT");
     } catch (e) { await db.exec("ROLLBACK"); throw e; }
@@ -609,9 +676,10 @@ v1.post("/inventario", authenticate, canInv, async (req, res) => {
 });
 v1.patch("/inventario/:id", authenticate, canInv, async (req, res) => {
   try {
-    const item = await db.get("SELECT gtin, lot FROM inventario WHERE id = ?", [req.params.id]);
+    const org = req.user.org_id;
+    const item = await db.get("SELECT gtin, lot FROM inventario WHERE id = ? AND org_id = ?", [req.params.id, org]);
     if (!item) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run("UPDATE inventario SET fecha_baja = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
+    await db.run("UPDATE inventario SET fecha_baja = ? WHERE id = ? AND org_id = ?", [new Date().toISOString(), req.params.id, org]);
     await registrarLog(req.user.nombre, "BAJA STOCK", `GTIN: ${item.gtin} | Lote: ${item.lot}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -621,6 +689,7 @@ v1.patch("/inventario/:id", authenticate, canInv, async (req, res) => {
 // stock suficiente, no se descuenta nada y se reportan los faltantes.
 v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
   try {
+    const org = req.user.org_id;
     const { items } = req.body;
     if (!Array.isArray(items) || items.length === 0)
       return res.status(400).json({ success: false, message: "items debe ser un array no vacío" });
@@ -637,7 +706,7 @@ v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
     // Validar stock disponible por (gtin, lot) ANTES de tocar nada
     const insuficientes = [];
     for (const n of norm) {
-      const row = await db.get("SELECT COUNT(*) AS c FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'ACEPTADO'", [n.gtin, n.lot]);
+      const row = await db.get("SELECT COUNT(*) AS c FROM inventario WHERE org_id = ? AND gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'ACEPTADO'", [org, n.gtin, n.lot]);
       if (row.c < n.cant) insuficientes.push({ gtin: n.gtin, lot: n.lot, pedido: n.cant, disponible: row.c });
     }
     if (insuficientes.length)
@@ -649,8 +718,8 @@ v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
     try {
       for (const n of norm) {
         const rows = await db.all(
-          "SELECT id FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'ACEPTADO' ORDER BY expiration ASC, scanDate ASC LIMIT ?",
-          [n.gtin, n.lot, n.cant]);
+          "SELECT id FROM inventario WHERE org_id = ? AND gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'ACEPTADO' ORDER BY expiration ASC, scanDate ASC LIMIT ?",
+          [org, n.gtin, n.lot, n.cant]);
         for (const r of rows) {
           await db.run("UPDATE inventario SET fecha_baja = ? WHERE id = ?", [now, r.id]);
           total++;
@@ -668,17 +737,18 @@ v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
 // ACEPTADO habilita el lote para salida; RECHAZADO lo segrega (da de baja).
 v1.patch("/inventario/lote/estado", authenticate, authorize("ADMIN", "TECNOLOGO"), async (req, res) => {
   try {
+    const org = req.user.org_id;
     const { gtin, lot, decision } = req.body;
     if (!gtin || !lot || !["ACEPTADO", "RECHAZADO"].includes(decision))
       return res.status(400).json({ success: false, message: "gtin, lot y decision (ACEPTADO|RECHAZADO) requeridos" });
     const now = new Date().toISOString();
     let affected;
     if (decision === "ACEPTADO") {
-      const r = await db.run("UPDATE inventario SET estado_aceptacion = 'ACEPTADO' WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'PENDIENTE'", [gtin, lot]);
+      const r = await db.run("UPDATE inventario SET estado_aceptacion = 'ACEPTADO' WHERE org_id = ? AND gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'PENDIENTE'", [org, gtin, lot]);
       affected = r.changes;
     } else {
       // RECHAZADO: marca estado y segrega físicamente (fecha_baja → fuera del stock usable)
-      const r = await db.run("UPDATE inventario SET estado_aceptacion = 'RECHAZADO', fecha_baja = ? WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'PENDIENTE'", [now, gtin, lot]);
+      const r = await db.run("UPDATE inventario SET estado_aceptacion = 'RECHAZADO', fecha_baja = ? WHERE org_id = ? AND gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'PENDIENTE'", [now, org, gtin, lot]);
       affected = r.changes;
     }
     await registrarLog(req.user.nombre, decision === "ACEPTADO" ? "ACEPTAR LOTE" : "RECHAZAR LOTE", `GTIN: ${gtin} | Lote: ${lot} | ${affected} u.`, getIP(req));
@@ -694,6 +764,7 @@ v1.post("/inventario/bulk-import", authenticate, authorize("ADMIN"), async (req,
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, message: "items debe ser un array no vacío" });
     if (items.length > 5000) return res.status(400).json({ success: false, message: "Máximo 5000 filas por import" });
 
+    const org = req.user.org_id;
     let inserted = 0, updated = 0, skipped = 0;
     const errors = [];
     await db.exec("BEGIN");
@@ -704,11 +775,11 @@ v1.post("/inventario/bulk-import", authenticate, authorize("ADMIN"), async (req,
         const nombre = String(r.nombre || "").trim();
         const seccion = String(r.seccion || "").trim();
         if (!gtin || !nombre || !seccion) { skipped++; errors.push({ row: i+2, reason: "Faltan campos GTIN, Nombre o Sección" }); continue; }
-        await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
-        const existing = await db.get("SELECT gtin FROM maestro_productos WHERE gtin = ?", [gtin]);
+        await db.run("INSERT OR IGNORE INTO secciones (org_id, nombre) VALUES (?, ?)", [org, seccion]);
+        const existing = await db.get("SELECT gtin FROM maestro_productos WHERE org_id = ? AND gtin = ?", [org, gtin]);
         await db.run(
-          "INSERT OR REPLACE INTO maestro_productos (gtin, nombre, detalle, pack, seccion, temperatura, preparacion) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [gtin, nombre, r.detalle || "", r.pack || "", seccion, r.temperatura || "Refrigerado", r.preparacion || ""]
+          "INSERT OR REPLACE INTO maestro_productos (org_id, gtin, nombre, detalle, pack, seccion, temperatura, preparacion) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [org, gtin, nombre, r.detalle || "", r.pack || "", seccion, r.temperatura || "Refrigerado", r.preparacion || ""]
         );
         if (existing) updated++; else inserted++;
       }
@@ -724,9 +795,10 @@ v1.post("/inventario/bulk-import", authenticate, authorize("ADMIN"), async (req,
 
 v1.put("/inventario/lote", authenticate, canInv, async (req, res) => {
   try {
+    const org = req.user.org_id;
     const { gtin, lotActual, nuevoLot, nuevaExp } = req.body;
-    await db.run("UPDATE inventario SET lot = ?, expiration = ? WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL",
-      [nuevoLot, nuevaExp, gtin, lotActual]);
+    await db.run("UPDATE inventario SET lot = ?, expiration = ? WHERE org_id = ? AND gtin = ? AND lot = ? AND fecha_baja IS NULL",
+      [nuevoLot, nuevaExp, org, gtin, lotActual]);
     await registrarLog(req.user.nombre, "EDITAR LOTE", `GTIN: ${gtin} | ${lotActual} → ${nuevoLot}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -735,7 +807,7 @@ v1.put("/inventario/lote", authenticate, canInv, async (req, res) => {
 // ── PROTOCOLOS ──────────────────────────────────────────────────────────────
 const canProto = authorize("ADMIN", "TECNOLOGO");
 v1.get("/protocolos", authenticate, async (req, res) => {
-  try { res.json(await db.all("SELECT * FROM protocolos WHERE fecha_baja IS NULL ORDER BY seccion ASC, titulo ASC")); }
+  try { res.json(await db.all("SELECT * FROM protocolos WHERE org_id = ? AND fecha_baja IS NULL ORDER BY seccion ASC, titulo ASC", [req.user.org_id])); }
   catch (e) { errRes(res, e); }
 });
 v1.post("/protocolos", authenticate, canProto, async (req, res) => {
@@ -743,8 +815,8 @@ v1.post("/protocolos", authenticate, canProto, async (req, res) => {
     const { titulo, seccion, contenido } = req.body;
     if (!titulo || !seccion || !contenido) return res.status(400).json({ success: false, message: "Faltan campos" });
     const id = randomUUID(); const now = new Date().toISOString();
-    await db.run("INSERT INTO protocolos (id, titulo, seccion, contenido, autor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [id, titulo, seccion, contenido, req.user.nombre, now, now]);
+    await db.run("INSERT INTO protocolos (id, titulo, seccion, contenido, autor, created_at, updated_at, org_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, titulo, seccion, contenido, req.user.nombre, now, now, req.user.org_id]);
     await registrarLog(req.user.nombre, "NUEVO PROTOCOLO", `"${titulo}" → ${seccion}`, getIP(req));
     res.json({ success: true, id });
   } catch (e) { errRes(res, e); }
@@ -752,8 +824,8 @@ v1.post("/protocolos", authenticate, canProto, async (req, res) => {
 v1.put("/protocolos/:id", authenticate, canProto, async (req, res) => {
   try {
     const { titulo, seccion, contenido } = req.body;
-    await db.run("UPDATE protocolos SET titulo=?, seccion=?, contenido=?, updated_at=? WHERE id=?",
-      [titulo, seccion, contenido, new Date().toISOString(), req.params.id]);
+    await db.run("UPDATE protocolos SET titulo=?, seccion=?, contenido=?, updated_at=? WHERE id=? AND org_id=?",
+      [titulo, seccion, contenido, new Date().toISOString(), req.params.id, req.user.org_id]);
     await registrarLog(req.user.nombre, "EDITAR PROTOCOLO", `"${titulo}" (${seccion})`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -761,9 +833,9 @@ v1.put("/protocolos/:id", authenticate, canProto, async (req, res) => {
 // SOFT delete
 v1.delete("/protocolos/:id", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
-    const p = await db.get("SELECT titulo FROM protocolos WHERE id = ?", [req.params.id]);
+    const p = await db.get("SELECT titulo FROM protocolos WHERE id = ? AND org_id = ?", [req.params.id, req.user.org_id]);
     if (!p) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run("UPDATE protocolos SET fecha_baja = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
+    await db.run("UPDATE protocolos SET fecha_baja = ? WHERE id = ? AND org_id = ?", [new Date().toISOString(), req.params.id, req.user.org_id]);
     await registrarLog(req.user.nombre, "ELIMINAR PROTOCOLO (SOFT)", `"${p.titulo}"`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -771,7 +843,7 @@ v1.delete("/protocolos/:id", authenticate, authorize("ADMIN"), async (req, res) 
 
 // ── ANEXOS ──────────────────────────────────────────────────────────────────
 v1.get("/anexos", authenticate, async (req, res) => {
-  try { res.json(await db.all("SELECT * FROM anexos WHERE fecha_baja IS NULL ORDER BY servicio ASC, salas ASC")); }
+  try { res.json(await db.all("SELECT * FROM anexos WHERE org_id = ? AND fecha_baja IS NULL ORDER BY servicio ASC, salas ASC", [req.user.org_id])); }
   catch (e) { errRes(res, e); }
 });
 v1.post("/anexos", authenticate, authorize("ADMIN"), async (req, res) => {
@@ -779,8 +851,8 @@ v1.post("/anexos", authenticate, authorize("ADMIN"), async (req, res) => {
     const { servicio, salas, numero } = req.body;
     if (!servicio || !numero) return res.status(400).json({ success: false, message: "Servicio y número obligatorios" });
     const id = randomUUID(); const now = new Date().toISOString();
-    await db.run("INSERT INTO anexos (id, servicio, salas, numero, creado_por, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [id, servicio, salas || "", numero, req.user.nombre, now, now]);
+    await db.run("INSERT INTO anexos (id, servicio, salas, numero, creado_por, created_at, updated_at, org_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, servicio, salas || "", numero, req.user.nombre, now, now, req.user.org_id]);
     await registrarLog(req.user.nombre, "NUEVO ANEXO", `${servicio}${salas ? " / " + salas : ""} — ${numero}`, getIP(req));
     res.json({ success: true, id });
   } catch (e) { errRes(res, e); }
@@ -788,17 +860,17 @@ v1.post("/anexos", authenticate, authorize("ADMIN"), async (req, res) => {
 v1.put("/anexos/:id", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
     const { servicio, salas, numero } = req.body;
-    await db.run("UPDATE anexos SET servicio=?, salas=?, numero=?, updated_at=? WHERE id=?",
-      [servicio, salas || "", numero, new Date().toISOString(), req.params.id]);
+    await db.run("UPDATE anexos SET servicio=?, salas=?, numero=?, updated_at=? WHERE id=? AND org_id=?",
+      [servicio, salas || "", numero, new Date().toISOString(), req.params.id, req.user.org_id]);
     await registrarLog(req.user.nombre, "EDITAR ANEXO", `${servicio} — ${numero}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
 });
 v1.delete("/anexos/:id", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
-    const a = await db.get("SELECT servicio, numero FROM anexos WHERE id = ?", [req.params.id]);
+    const a = await db.get("SELECT servicio, numero FROM anexos WHERE id = ? AND org_id = ?", [req.params.id, req.user.org_id]);
     if (!a) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run("UPDATE anexos SET fecha_baja = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
+    await db.run("UPDATE anexos SET fecha_baja = ? WHERE id = ? AND org_id = ?", [new Date().toISOString(), req.params.id, req.user.org_id]);
     await registrarLog(req.user.nombre, "ELIMINAR ANEXO (SOFT)", `${a.servicio} — ${a.numero}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -830,8 +902,8 @@ const EXP_WARN_DAYS = 90, EXP_CRIT_DAYS = 30;
 v1.get("/inventario/alertas", authenticate, async (req, res) => {
   try {
     const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, i.estado_aceptacion, m.nombre, m.abreviado, m.seccion, m.min_stock
-      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-      WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+      WHERE i.org_id = ? AND i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`, [req.user.org_id]);
     const lotes = {}, porProducto = {}, pendMap = {};
     for (const r of rows) {
       const k = r.gtin + "||" + r.lot;
@@ -861,12 +933,13 @@ v1.get("/inventario/alertas", authenticate, async (req, res) => {
 // Exportación CSV: tipo = inventario | vencimientos | movimientos
 v1.get("/export/csv", authenticate, async (req, res) => {
   try {
+    const org = req.user.org_id;
     const tipo = String(req.query.tipo || "inventario");
     let filename = tipo, csv = "";
     if (tipo === "inventario") {
       const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, i.estado_aceptacion, m.nombre, m.abreviado, m.seccion, m.min_stock
-        FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-        WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
+        FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+        WHERE i.org_id = ? AND i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`, [org]);
       const g = {};
       for (const r of rows) { const k = r.gtin + "||" + r.lot; if (!g[k]) g[k] = { ...r, cantidad: 0 }; g[k].cantidad++; }
       const data = Object.values(g).sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
@@ -875,8 +948,8 @@ v1.get("/export/csv", authenticate, async (req, res) => {
           return [d.nombre, d.abreviado || "", d.gtin, d.lot, fmtExpServer(d.expiration), d.cantidad, d.seccion || "", estado, dias ?? "", d.min_stock || 0, d.estado_aceptacion || "ACEPTADO"]; }));
     } else if (tipo === "vencimientos") {
       const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion
-        FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-        WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
+        FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+        WHERE i.org_id = ? AND i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`, [org]);
       const g = {};
       for (const r of rows) { const k = r.gtin + "||" + r.lot; if (!g[k]) g[k] = { ...r, cantidad: 0, dias: diasAVencer(r.expiration) }; g[k].cantidad++; }
       const data = Object.values(g).filter(d => d.dias !== null && d.dias <= EXP_WARN_DAYS).sort((a, b) => a.dias - b.dias);
@@ -884,8 +957,8 @@ v1.get("/export/csv", authenticate, async (req, res) => {
         data.map(d => [d.nombre || "Sin clasificar", d.gtin, d.lot, fmtExpServer(d.expiration), d.dias, d.dias < 0 ? "VENCIDO" : d.dias <= EXP_CRIT_DAYS ? "CRITICO" : "POR VENCER", d.cantidad, d.seccion || ""]));
     } else if (tipo === "movimientos") {
       const rows = await db.all(`SELECT fecha, usuario, accion, detalles, ip FROM logs
-        WHERE accion IN ('INGRESO STOCK','SALIDA STOCK','BAJA STOCK','EDITAR LOTE','NUEVO MAESTRO','EDITAR MAESTRO')
-        ORDER BY fecha DESC LIMIT 10000`);
+        WHERE org_id = ? AND accion IN ('INGRESO STOCK','SALIDA STOCK','BAJA STOCK','EDITAR LOTE','NUEVO MAESTRO','EDITAR MAESTRO','ACEPTAR LOTE','RECHAZAR LOTE')
+        ORDER BY fecha DESC LIMIT 10000`, [org]);
       csv = toCSV(["Fecha", "Usuario", "Accion", "Detalles", "IP"], rows.map(r => [r.fecha, r.usuario, r.accion, r.detalles, r.ip || ""]));
     } else {
       return res.status(400).json({ success: false, message: "tipo inválido (inventario|vencimientos|movimientos)" });
@@ -901,8 +974,8 @@ v1.get("/export/csv", authenticate, async (req, res) => {
 v1.get("/producto/:gtin", authenticate, async (req, res) => {
   try {
     const row = await db.get(
-      "SELECT * FROM maestro_productos WHERE gtin = ? AND nombre IS NOT NULL AND nombre != '' AND fecha_baja IS NULL",
-      [req.params.gtin]
+      "SELECT * FROM maestro_productos WHERE org_id = ? AND gtin = ? AND nombre IS NOT NULL AND nombre != '' AND fecha_baja IS NULL",
+      [req.user.org_id, req.params.gtin]
     );
     res.json(row || null);
   } catch (e) { errRes(res, e); }
@@ -912,7 +985,8 @@ v1.get("/producto/:gtin", authenticate, async (req, res) => {
 v1.get("/maestro", authenticate, async (req, res) => {
   try {
     const rows = await db.all(
-      "SELECT * FROM maestro_productos WHERE nombre IS NOT NULL AND nombre != '' AND fecha_baja IS NULL ORDER BY nombre ASC"
+      "SELECT * FROM maestro_productos WHERE org_id = ? AND nombre IS NOT NULL AND nombre != '' AND fecha_baja IS NULL ORDER BY nombre ASC",
+      [req.user.org_id]
     );
     res.json(rows);
   } catch (e) { errRes(res, e); }
@@ -924,8 +998,8 @@ v1.get("/maestro/by-name", authenticate, async (req, res) => {
     const { nombre } = req.query;
     if (!nombre) return res.json(null);
     const row = await db.get(
-      "SELECT * FROM maestro_productos WHERE LOWER(nombre) = LOWER(?) AND fecha_baja IS NULL LIMIT 1",
-      [String(nombre).trim()]
+      "SELECT * FROM maestro_productos WHERE org_id = ? AND LOWER(nombre) = LOWER(?) AND fecha_baja IS NULL LIMIT 1",
+      [req.user.org_id, String(nombre).trim()]
     );
     res.json(row || null);
   } catch (e) { errRes(res, e); }
@@ -940,17 +1014,18 @@ v1.post("/producto", authenticate, canInv, async (req, res) => {
       duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, min_stock,
     } = req.body;
     if (!gtin || !nombre || !seccion) return res.status(400).json({ success: false, message: "GTIN, nombre y sección obligatorios" });
-    await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
+    const org = req.user.org_id;
+    await db.run("INSERT OR IGNORE INTO secciones (org_id, nombre) VALUES (?, ?)", [org, seccion]);
     const storage = almacenamiento_sin_abrir || temperatura || "Refrigerado";
     await db.run(
       `INSERT OR REPLACE INTO maestro_productos (
-        gtin, nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
+        org_id, gtin, nombre, abreviado, detalle, pack, seccion, temperatura, preparacion,
         almacenamiento_sin_abrir, descongelar_min, reconstituir,
         tiempo_reconstitucion_min, temperatura_post_reconstitucion,
         duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, min_stock, fecha_baja
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       [
-        gtin, nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
+        org, gtin, nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
         storage, descongelar_min ?? null, reconstituir || "No",
         tiempo_reconstitucion_min ?? null, temperatura_post_reconstitucion || null,
         duracion_dias ?? null, cantidad_alicuotas ?? null, volumen_ul ?? null,
@@ -970,7 +1045,8 @@ v1.put("/producto/:gtin", authenticate, canInv, async (req, res) => {
       tiempo_reconstitucion_min, temperatura_post_reconstitucion,
       duracion_dias, cantidad_alicuotas, volumen_ul, dias_uso_aprox, min_stock,
     } = req.body;
-    await db.run("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", [seccion]);
+    const org = req.user.org_id;
+    await db.run("INSERT OR IGNORE INTO secciones (org_id, nombre) VALUES (?, ?)", [org, seccion]);
     const storage = almacenamiento_sin_abrir || temperatura || "Refrigerado";
     await db.run(
       `UPDATE maestro_productos SET
@@ -978,14 +1054,14 @@ v1.put("/producto/:gtin", authenticate, canInv, async (req, res) => {
         almacenamiento_sin_abrir=?, descongelar_min=?, reconstituir=?,
         tiempo_reconstitucion_min=?, temperatura_post_reconstitucion=?,
         duracion_dias=?, cantidad_alicuotas=?, volumen_ul=?, dias_uso_aprox=?, min_stock=?
-        WHERE gtin=?`,
+        WHERE org_id=? AND gtin=?`,
       [
         nombre, abreviado || "", detalle || "", pack || "", seccion, storage, preparacion || "",
         storage, descongelar_min ?? null, reconstituir || "No",
         tiempo_reconstitucion_min ?? null, temperatura_post_reconstitucion || null,
         duracion_dias ?? null, cantidad_alicuotas ?? null, volumen_ul ?? null,
         dias_uso_aprox ?? null, Math.max(0, parseInt(min_stock, 10) || 0),
-        req.params.gtin,
+        org, req.params.gtin,
       ]
     );
     await registrarLog(req.user.nombre, "EDITAR MAESTRO", `${nombre} (GTIN: ${req.params.gtin})`, getIP(req));
@@ -996,11 +1072,12 @@ v1.put("/producto/:gtin", authenticate, canInv, async (req, res) => {
 // SOFT delete: marca fecha_baja en maestro + da de baja stock asociado
 v1.delete("/producto/:gtin", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
-    const prod = await db.get("SELECT nombre FROM maestro_productos WHERE gtin = ?", [req.params.gtin]);
+    const org = req.user.org_id;
+    const prod = await db.get("SELECT nombre FROM maestro_productos WHERE org_id = ? AND gtin = ?", [org, req.params.gtin]);
     if (!prod) return res.status(404).json({ success: false, message: "Producto no encontrado" });
     const now = new Date().toISOString();
-    await db.run("UPDATE inventario SET fecha_baja = ? WHERE gtin = ? AND fecha_baja IS NULL", [now, req.params.gtin]);
-    await db.run("UPDATE maestro_productos SET fecha_baja = ? WHERE gtin = ?", [now, req.params.gtin]);
+    await db.run("UPDATE inventario SET fecha_baja = ? WHERE org_id = ? AND gtin = ? AND fecha_baja IS NULL", [now, org, req.params.gtin]);
+    await db.run("UPDATE maestro_productos SET fecha_baja = ? WHERE org_id = ? AND gtin = ?", [now, org, req.params.gtin]);
     await registrarLog(req.user.nombre, "ELIMINAR MAESTRO (SOFT)", `${prod.nombre}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -1009,8 +1086,9 @@ v1.delete("/producto/:gtin", authenticate, authorize("ADMIN"), async (req, res) 
 // ── CONFIG / LOGS / USERS ──────────────────────────────────────────────────
 v1.get("/config", authenticate, async (req, res) => {
   try {
-    const secciones = await db.all("SELECT * FROM secciones WHERE nombre IS NOT NULL ORDER BY nombre ASC");
-    const usuarios  = await db.all("SELECT id, nombre, rol FROM usuarios WHERE fecha_baja IS NULL");
+    const org = req.user.org_id;
+    const secciones = await db.all("SELECT * FROM secciones WHERE org_id = ? AND nombre IS NOT NULL ORDER BY nombre ASC", [org]);
+    const usuarios  = await db.all("SELECT id, nombre, rol FROM usuarios WHERE org_id = ? AND fecha_baja IS NULL", [org]);
     res.json({ secciones, usuarios });
   } catch (e) { errRes(res, e); }
 });
@@ -1019,8 +1097,8 @@ v1.get("/logs", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
     const { cursor } = req.query;
     const LIMIT = 200;
-    let q = "SELECT * FROM logs"; const params = [];
-    if (cursor) { q += " WHERE fecha < ?"; params.push(cursor); }
+    let q = "SELECT * FROM logs WHERE org_id = ?"; const params = [req.user.org_id];
+    if (cursor) { q += " AND fecha < ?"; params.push(cursor); }
     q += " ORDER BY fecha DESC LIMIT ?"; params.push(LIMIT + 1);
     let rows = await db.all(q, params);
     let hasMore = false;
@@ -1047,7 +1125,7 @@ v1.post("/usuarios", authenticate, authorize("ADMIN"), async (req, res) => {
     if (await db.get("SELECT id FROM usuarios WHERE nombre = ?", [nombre])) return res.status(409).json({ success: false, message: "El usuario ya existe" });
     const id = randomUUID();
     const hash = await bcrypt.hash(pin, 10);
-    await db.run("INSERT INTO usuarios (id, nombre, rol, pin, must_change_pin) VALUES (?, ?, ?, ?, 1)", [id, nombre, rol, hash]);
+    await db.run("INSERT INTO usuarios (id, nombre, rol, pin, must_change_pin, org_id) VALUES (?, ?, ?, ?, 1, ?)", [id, nombre, rol, hash, req.user.org_id]);
     await registrarLog(req.user.nombre, "CREAR USUARIO", `${nombre} (${rol})`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -1056,9 +1134,10 @@ v1.post("/usuarios", authenticate, authorize("ADMIN"), async (req, res) => {
 v1.delete("/usuarios/:id", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
     if (req.params.id === req.user.sub) return res.status(400).json({ success: false, message: "No puede auto-eliminarse" });
-    const user = await db.get("SELECT nombre, rol FROM usuarios WHERE id = ?", [req.params.id]);
+    const org = req.user.org_id;
+    const user = await db.get("SELECT nombre, rol FROM usuarios WHERE id = ? AND org_id = ?", [req.params.id, org]);
     if (!user) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run("UPDATE usuarios SET fecha_baja = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
+    await db.run("UPDATE usuarios SET fecha_baja = ? WHERE id = ? AND org_id = ?", [new Date().toISOString(), req.params.id, org]);
     await registrarLog(req.user.nombre, "ELIMINAR USUARIO (SOFT)", `${user.nombre} (${user.rol})`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -1155,9 +1234,9 @@ v1.delete("/admin/hard-delete/:tabla/:id", authenticate, authorize("ADMIN"), asy
     if (req.params.tabla === "usuarios" && req.params.id === req.user.sub) {
       return res.status(400).json({ success: false, message: "No puede auto-eliminarse" });
     }
-    const existed = await db.get(`SELECT ${meta.pk} FROM ${req.params.tabla} WHERE ${meta.pk} = ?`, [req.params.id]);
+    const existed = await db.get(`SELECT ${meta.pk} FROM ${req.params.tabla} WHERE ${meta.pk} = ? AND org_id = ?`, [req.params.id, req.user.org_id]);
     if (!existed) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run(`DELETE FROM ${req.params.tabla} WHERE ${meta.pk} = ?`, [req.params.id]);
+    await db.run(`DELETE FROM ${req.params.tabla} WHERE ${meta.pk} = ? AND org_id = ?`, [req.params.id, req.user.org_id]);
     await registrarLog(req.user.nombre, "HARD DELETE", `${meta.label}: ${req.params.id}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -1167,9 +1246,9 @@ v1.post("/admin/restore/:tabla/:id", authenticate, authorize("ADMIN"), async (re
   try {
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
-    const existed = await db.get(`SELECT ${meta.pk} FROM ${req.params.tabla} WHERE ${meta.pk} = ?`, [req.params.id]);
+    const existed = await db.get(`SELECT ${meta.pk} FROM ${req.params.tabla} WHERE ${meta.pk} = ? AND org_id = ?`, [req.params.id, req.user.org_id]);
     if (!existed) return res.status(404).json({ success: false, message: "No encontrado" });
-    await db.run(`UPDATE ${req.params.tabla} SET ${meta.softCol} = NULL WHERE ${meta.pk} = ?`, [req.params.id]);
+    await db.run(`UPDATE ${req.params.tabla} SET ${meta.softCol} = NULL WHERE ${meta.pk} = ? AND org_id = ?`, [req.params.id, req.user.org_id]);
     await registrarLog(req.user.nombre, "RESTAURAR", `${meta.label}: ${req.params.id}`, getIP(req));
     res.json({ success: true });
   } catch (e) { errRes(res, e); }
@@ -1180,7 +1259,7 @@ v1.get("/admin/trash/:tabla", authenticate, authorize("ADMIN"), async (req, res)
   try {
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
-    const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE ${meta.softCol} IS NOT NULL ORDER BY ${meta.softCol} DESC LIMIT 500`);
+    const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE org_id = ? AND ${meta.softCol} IS NOT NULL ORDER BY ${meta.softCol} DESC LIMIT 500`, [req.user.org_id]);
     res.json(rows);
   } catch (e) { errRes(res, e); }
 });
@@ -1190,7 +1269,7 @@ v1.get("/admin/all/:tabla", authenticate, authorize("ADMIN"), async (req, res) =
   try {
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
-    const rows = await db.all(`SELECT * FROM ${req.params.tabla} ORDER BY ${meta.softCol} ASC LIMIT 2000`);
+    const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE org_id = ? ORDER BY ${meta.softCol} ASC LIMIT 2000`, [req.user.org_id]);
     res.json(rows);
   } catch (e) { errRes(res, e); }
 });
@@ -1235,29 +1314,31 @@ v1.get("/admin/dashboard", authenticate, authorize("ADMIN"), async (req, res) =>
     const last7Days = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
     const last30Days = new Date(Date.now() - 30 * 86400000).toISOString().split("T")[0];
 
+    const org = req.user.org_id;
+    // login_lockouts es global (seguridad pre-sesión, sin contexto de org).
     const totals = await db.get(`
       SELECT
-        (SELECT COUNT(*) FROM inventario WHERE fecha_baja IS NULL) AS stock_activo,
-        (SELECT COUNT(*) FROM inventario WHERE fecha_baja IS NOT NULL) AS stock_consumido,
-        (SELECT COUNT(*) FROM maestro_productos WHERE fecha_baja IS NULL) AS productos_maestro,
-        (SELECT COUNT(*) FROM usuarios WHERE fecha_baja IS NULL) AS usuarios_total,
-        (SELECT COUNT(*) FROM anexos WHERE fecha_baja IS NULL) AS anexos_total,
-        (SELECT COUNT(*) FROM protocolos WHERE fecha_baja IS NULL) AS protocolos_total,
-        (SELECT COUNT(*) FROM secciones) AS secciones_total,
-        (SELECT COUNT(*) FROM logs) AS logs_total,
-        (SELECT COUNT(*) FROM logs WHERE DATE(fecha) = ?) AS logs_hoy,
-        (SELECT COUNT(*) FROM logs WHERE DATE(fecha) >= ?) AS logs_7d,
-        (SELECT COUNT(*) FROM logs WHERE accion LIKE 'LOGIN FALLIDO' AND DATE(fecha) >= ?) AS login_fallidos_7d,
-        (SELECT COUNT(*) FROM logs WHERE accion LIKE 'ACCESO DENEGADO' AND DATE(fecha) >= ?) AS denegados_7d,
+        (SELECT COUNT(*) FROM inventario WHERE org_id = ? AND fecha_baja IS NULL) AS stock_activo,
+        (SELECT COUNT(*) FROM inventario WHERE org_id = ? AND fecha_baja IS NOT NULL) AS stock_consumido,
+        (SELECT COUNT(*) FROM maestro_productos WHERE org_id = ? AND fecha_baja IS NULL) AS productos_maestro,
+        (SELECT COUNT(*) FROM usuarios WHERE org_id = ? AND fecha_baja IS NULL) AS usuarios_total,
+        (SELECT COUNT(*) FROM anexos WHERE org_id = ? AND fecha_baja IS NULL) AS anexos_total,
+        (SELECT COUNT(*) FROM protocolos WHERE org_id = ? AND fecha_baja IS NULL) AS protocolos_total,
+        (SELECT COUNT(*) FROM secciones WHERE org_id = ?) AS secciones_total,
+        (SELECT COUNT(*) FROM logs WHERE org_id = ?) AS logs_total,
+        (SELECT COUNT(*) FROM logs WHERE org_id = ? AND DATE(fecha) = ?) AS logs_hoy,
+        (SELECT COUNT(*) FROM logs WHERE org_id = ? AND DATE(fecha) >= ?) AS logs_7d,
+        (SELECT COUNT(*) FROM logs WHERE org_id = ? AND accion LIKE 'LOGIN FALLIDO' AND DATE(fecha) >= ?) AS login_fallidos_7d,
+        (SELECT COUNT(*) FROM logs WHERE org_id = ? AND accion LIKE 'ACCESO DENEGADO' AND DATE(fecha) >= ?) AS denegados_7d,
         (SELECT COUNT(*) FROM login_lockouts WHERE locked_until IS NOT NULL AND locked_until > datetime('now')) AS cuentas_bloqueadas
-    `, [todayISO, last7Days, last7Days, last30Days]);
+    `, [org, org, org, org, org, org, org, org, org, todayISO, org, last7Days, org, last7Days, org, last30Days]);
 
     // Próximos a vencer (próximos 30 / 90 días). expiration es AAMMDD.
     const allActive = await db.all(`
       SELECT i.expiration, i.gtin, m.nombre, m.seccion
-      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-      WHERE i.fecha_baja IS NULL AND length(i.expiration) = 6
-    `);
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+      WHERE i.org_id = ? AND i.fecha_baja IS NULL AND length(i.expiration) = 6
+    `, [org]);
     const today = new Date(); today.setHours(0,0,0,0);
     let vencidos = 0, lt30 = 0, lt90 = 0;
     for (const r of allActive) {
@@ -1273,42 +1354,42 @@ v1.get("/admin/dashboard", authenticate, authorize("ADMIN"), async (req, res) =>
     // Distribución por sección (stock activo)
     const porSeccion = await db.all(`
       SELECT COALESCE(m.seccion, 'Sin clasificar') AS seccion, COUNT(*) AS count
-      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-      WHERE i.fecha_baja IS NULL
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+      WHERE i.org_id = ? AND i.fecha_baja IS NULL
       GROUP BY m.seccion
       ORDER BY count DESC
-    `);
+    `, [org]);
 
     // Distribución por temperatura
     const porTemperatura = await db.all(`
       SELECT COALESCE(m.temperatura, 'Sin clasificar') AS temperatura, COUNT(*) AS count
-      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
-      WHERE i.fecha_baja IS NULL
+      FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin AND m.org_id = i.org_id
+      WHERE i.org_id = ? AND i.fecha_baja IS NULL
       GROUP BY m.temperatura
-    `);
+    `, [org]);
 
     // Usuarios por rol
-    const porRol = await db.all(`SELECT rol, COUNT(*) AS count FROM usuarios GROUP BY rol`);
+    const porRol = await db.all(`SELECT rol, COUNT(*) AS count FROM usuarios WHERE org_id = ? GROUP BY rol`, [org]);
 
     // Actividad últimos 7 días (timeline)
     const actividad7d = await db.all(`
       SELECT DATE(fecha) AS dia, COUNT(*) AS count
-      FROM logs WHERE DATE(fecha) >= ?
+      FROM logs WHERE org_id = ? AND DATE(fecha) >= ?
       GROUP BY DATE(fecha) ORDER BY dia ASC
-    `, [last7Days]);
+    `, [org, last7Days]);
 
     // Top usuarios por actividad
     const topUsuarios = await db.all(`
       SELECT usuario, perfil, COUNT(*) AS acciones
-      FROM logs WHERE DATE(fecha) >= ?
+      FROM logs WHERE org_id = ? AND DATE(fecha) >= ?
       GROUP BY usuario, perfil ORDER BY acciones DESC LIMIT 5
-    `, [last7Days]);
+    `, [org, last7Days]);
 
     // Actividad reciente (10 últimos eventos)
     const recent = await db.all(`
       SELECT id, usuario, perfil, accion, detalles, fecha, ip
-      FROM logs ORDER BY fecha DESC LIMIT 10
-    `);
+      FROM logs WHERE org_id = ? ORDER BY fecha DESC LIMIT 10
+    `, [org]);
 
     res.json({
       totals,
@@ -1317,6 +1398,44 @@ v1.get("/admin/dashboard", authenticate, authorize("ADMIN"), async (req, res) =>
       actividad7d, topUsuarios, recent
     });
   } catch (e) { errRes(res, e); }
+});
+
+// ── PLATAFORMA: gestión de organizaciones (SUPER_ADMIN) ──────────────────────
+v1.get("/admin/orgs", authenticate, authorize("SUPER_ADMIN"), async (req, res) => {
+  try {
+    const orgs = await db.all(`SELECT o.*,
+      (SELECT COUNT(*) FROM usuarios u WHERE u.org_id = o.id AND u.fecha_baja IS NULL) AS usuarios,
+      (SELECT COUNT(*) FROM inventario i WHERE i.org_id = o.id AND i.fecha_baja IS NULL) AS stock_activo
+      FROM organizations o WHERE o.fecha_baja IS NULL ORDER BY o.created_at ASC`);
+    res.json(orgs);
+  } catch (e) { errRes(res, e); }
+});
+
+// Crea una organización nueva + su primer usuario ADMIN (onboarding de tenant)
+v1.post("/admin/orgs", authenticate, authorize("SUPER_ADMIN"), async (req, res) => {
+  try {
+    const nombre = String(req.body.nombre || "").trim();
+    const slug = String(req.body.slug || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+    const adminNombre = String(req.body.admin_nombre || "").trim();
+    const adminPin = String(req.body.admin_pin || "");
+    const plan = ["free", "pro", "enterprise"].includes(req.body.plan) ? req.body.plan : "free";
+    if (!nombre || !slug || !adminNombre || adminPin.length < 4)
+      return res.status(400).json({ success: false, message: "nombre, slug, admin_nombre y admin_pin (≥4) requeridos" });
+    if (await db.get("SELECT id FROM organizations WHERE slug = ?", [slug]))
+      return res.status(409).json({ success: false, message: "El slug ya existe" });
+    if (await db.get("SELECT id FROM usuarios WHERE nombre = ?", [adminNombre]))
+      return res.status(409).json({ success: false, message: "El nombre de usuario admin ya existe (debe ser único global)" });
+    const orgId = "org_" + randomUUID().replace(/-/g, "").slice(0, 16);
+    const hash = await bcrypt.hash(adminPin, 10);
+    await db.exec("BEGIN");
+    try {
+      await db.run("INSERT INTO organizations (id, nombre, slug, plan, created_at) VALUES (?, ?, ?, ?, ?)", [orgId, nombre, slug, plan, new Date().toISOString()]);
+      await db.run("INSERT INTO usuarios (id, nombre, rol, pin, must_change_pin, org_id) VALUES (?, ?, 'ADMIN', ?, 1, ?)", [randomUUID(), adminNombre, hash, orgId]);
+      await db.exec("COMMIT");
+    } catch (e) { await db.exec("ROLLBACK"); throw e; }
+    await registrarLog(req.user.nombre, "CREAR ORG", `${nombre} (${slug}) — admin: ${adminNombre}`, getIP(req));
+    res.json({ success: true, org_id: orgId, slug, admin: adminNombre });
+  } catch (e) { errRes(res, e, "Error al crear organización"); }
 });
 
 // ── HEALTH (no versionado, fuera de auth) ──────────────────────────────────
