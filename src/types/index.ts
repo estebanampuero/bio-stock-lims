@@ -11,6 +11,7 @@ export interface InvRow extends Partial<PrepFields> {
   id: string; gtin: string; lot: string; expiration: string; usuario: string;
   nombre?: string; abreviado?: string; detalle?: string; seccion?: string;
   temperatura?: string; preparacion?: string; min_stock?: number | null;
+  estado_aceptacion?: string;
 }
 
 export interface GroupedItem extends Partial<PrepFields> {
@@ -18,6 +19,7 @@ export interface GroupedItem extends Partial<PrepFields> {
   detalle: string; seccion: string;
   expiration: string; temperatura: string; preparacion: string;
   cantidad: number; itemIds: string[]; min_stock?: number | null;
+  estado_aceptacion?: string;
 }
 
 export interface Protocolo {

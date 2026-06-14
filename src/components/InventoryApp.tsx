@@ -179,8 +179,9 @@ export default function InventoryApp() {
   // ── Alertas y reportes (vencimiento + stock mínimo, ISO 15189 §6.6) ──────────
   type AlertaLote = { gtin:string; lot:string; expiration:string; vencimiento:string; nombre:string; abreviado:string; seccion:string; cantidad:number; dias:number; criticidad?:string };
   type AlertaProd = { gtin:string; nombre:string; seccion:string; min_stock:number; cantidad:number };
-  const [alertas, setAlertas] = useState<{ vencidos:AlertaLote[]; porVencer:AlertaLote[]; stockBajo:AlertaProd[]; resumen:{ vencidos:number; porVencer:number; stockBajo:number } }>(
-    { vencidos:[], porVencer:[], stockBajo:[], resumen:{ vencidos:0, porVencer:0, stockBajo:0 } });
+  type AlertaPend = { gtin:string; lot:string; expiration:string; vencimiento:string; nombre:string; seccion:string; cantidad:number };
+  const [alertas, setAlertas] = useState<{ vencidos:AlertaLote[]; porVencer:AlertaLote[]; stockBajo:AlertaProd[]; pendientes:AlertaPend[]; resumen:{ vencidos:number; porVencer:number; stockBajo:number; pendientes:number } }>(
+    { vencidos:[], porVencer:[], stockBajo:[], pendientes:[], resumen:{ vencidos:0, porVencer:0, stockBajo:0, pendientes:0 } });
 
   const descargarCSV = async (tipo: string) => {
     try {
@@ -462,6 +463,18 @@ export default function InventoryApp() {
       setSalidaCart([]);
       await fetchData();
     } finally { setSalidaBusy(false); }
+  };
+
+  // Aceptación de lote (ISO 15189 §6.6.3): habilitar o rechazar un lote PENDIENTE
+  const cambiarEstadoLote = async (g: { gtin:string; lot:string; nombre:string; cantidad:number }, decision: "ACEPTADO"|"RECHAZADO") => {
+    if (decision === "RECHAZADO") {
+      const ok = await confirmDialog(`¿Rechazar el lote ${g.lot} de "${g.nombre}"? Se darán de baja ${g.cantidad} unidad(es) y saldrán del stock.`, { title:"Rechazar lote", kind:"danger" });
+      if (!ok) return;
+    }
+    const r = await apiFetch(`/inventario/lote/estado`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ gtin:g.gtin, lot:g.lot, decision }) });
+    if (!r.ok) { const d = await r.json().catch(()=>({} as any)); toast(d.message || "No se pudo cambiar el estado.", "error"); return; }
+    toast(decision === "ACEPTADO" ? `Lote ${g.lot} aceptado — disponible para uso.` : `Lote ${g.lot} rechazado y dado de baja.`, "success");
+    await fetchData();
   };
 
   const handleModalScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -838,8 +851,11 @@ export default function InventoryApp() {
       volumen_ul: item.volumen_ul ?? null,
       dias_uso_aprox: item.dias_uso_aprox ?? null,
       min_stock: item.min_stock ?? 0,
+      estado_aceptacion: item.estado_aceptacion || "ACEPTADO",
       cantidad: 0, itemIds: [],
     };
+    // Un grupo (gtin,lot) se marca PENDIENTE si alguna unidad lo está
+    if (item.estado_aceptacion === "PENDIENTE") groupMap[key].estado_aceptacion = "PENDIENTE";
     groupMap[key].cantidad++; groupMap[key].itemIds.push(item.id);
   }
   const groupedList = Object.values(groupMap);
@@ -904,7 +920,7 @@ export default function InventoryApp() {
           {canInventario && <button onClick={()=>setView("Dashboard")} style={navBtn(view==="Dashboard")}><LayoutDashboard size={14}/> Inventario</button>}
           {canInventario && <button onClick={()=>setView("Salida")} style={navBtn(view==="Salida")}><PackageMinus size={14}/> Salida de Insumos</button>}
           {canInventario && (() => {
-            const totalAlertas = alertas.resumen.vencidos + alertas.resumen.porVencer + alertas.resumen.stockBajo;
+            const totalAlertas = alertas.resumen.vencidos + alertas.resumen.porVencer + alertas.resumen.stockBajo + alertas.resumen.pendientes;
             const urgentes = alertas.resumen.vencidos + alertas.resumen.stockBajo;
             return (
               <button onClick={()=>setView("Alertas")} style={{ ...navBtn(view==="Alertas"), justifyContent:"space-between" }}>
@@ -1138,7 +1154,10 @@ export default function InventoryApp() {
                           return (
                           <tr key={`${g.gtin}||${g.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
                             <td style={{ padding:"12px 13px" }}>
-                              <div style={{ fontWeight:700, color:"#1e293b" }}>{g.nombre}</div>
+                              <div style={{ fontWeight:700, color:"#1e293b", display:"flex", alignItems:"center", gap:7 }}>
+                                {g.nombre}
+                                {g.estado_aceptacion === "PENDIENTE" && <span title="Lote pendiente de aceptación (ISO 15189)" style={{ fontSize:"9.5px", fontWeight:800, color:"#b45309", background:"rgba(245,158,11,0.15)", border:"1px solid rgba(245,158,11,0.35)", padding:"2px 6px", borderRadius:5, letterSpacing:"0.3px" }}>PENDIENTE</span>}
+                              </div>
                               {g.detalle && <div style={{ fontSize:"11px", color:"#94a3b8", marginTop:2 }}>{g.detalle}</div>}
                             </td>
                             <td style={{ padding:"12px 13px", fontFamily:"'Roboto Mono',monospace", fontWeight:800, color:"#005a9c", fontSize:"12px" }}>{g.abreviado || "—"}</td>
@@ -1158,7 +1177,11 @@ export default function InventoryApp() {
                               <div style={{ display:"flex", gap:5, justifyContent:"center", flexWrap:"wrap" }}>
                                 {canPrep && <button onClick={()=>{ setPrepItem(g); setShowPrepModal(true); apiFetch(`/log-accion`, { method:"POST", body: JSON.stringify({ accion:"VER PREPARACIÓN", detalles:`${g.nombre} | ${g.lot}` }) }).catch(()=>{}); }} style={{ display:"flex", alignItems:"center", gap:3, color:"#0369a1", border:"1px solid rgba(3,105,161,0.2)", background:"rgba(3,105,161,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><BookOpen size={11}/> Prep.</button>}
                                 {isAdmin && <button onClick={()=>abrirEdicion(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#d97706", border:"1px solid rgba(217,119,6,0.2)", background:"rgba(217,119,6,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}><Pencil size={11}/> Editar</button>}
-                                {canConsumir && <button onClick={()=>consumirUnidad(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>− Consumir</button>}
+                                {g.estado_aceptacion === "PENDIENTE" && canInventario && <>
+                                  <button onClick={()=>cambiarEstadoLote(g, "ACEPTADO")} style={{ display:"flex", alignItems:"center", gap:3, color:"#059669", border:"1px solid rgba(5,150,105,0.25)", background:"rgba(5,150,105,0.08)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>✓ Aceptar</button>
+                                  <button onClick={()=>cambiarEstadoLote(g, "RECHAZADO")} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>✗ Rechazar</button>
+                                </>}
+                                {g.estado_aceptacion !== "PENDIENTE" && canConsumir && <button onClick={()=>consumirUnidad(g)} style={{ display:"flex", alignItems:"center", gap:3, color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 9px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>− Consumir</button>}
                               </div>
                             </td>
                           </tr>
@@ -1266,14 +1289,30 @@ export default function InventoryApp() {
             </div>
 
             {/* Resumen */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:18 }}>
-              {[["Vencidos",alertas.resumen.vencidos,"#dc2626"],["Por vencer (≤90d)",alertas.resumen.porVencer,"#f59e0b"],["Stock bajo",alertas.resumen.stockBajo,"#ea580c"]].map(([l,n,c])=>(
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:18 }}>
+              {[["Pendientes aceptación",alertas.resumen.pendientes,"#7c3aed"],["Vencidos",alertas.resumen.vencidos,"#dc2626"],["Por vencer (≤90d)",alertas.resumen.porVencer,"#f59e0b"],["Stock bajo",alertas.resumen.stockBajo,"#ea580c"]].map(([l,n,c])=>(
                 <div key={l as string} style={{ ...glass, padding:16, borderLeft:`4px solid ${c}` }}>
                   <div style={{ fontSize:"11px", color:"#64748b", fontWeight:700, marginBottom:4 }}>{l as string}</div>
                   <div style={{ fontSize:"26px", fontWeight:800, color:c as string }}>{n as number}</div>
                 </div>
               ))}
             </div>
+
+            {/* Pendientes de aceptación (ISO 15189 §6.6.3) */}
+            <AlertSection title="Pendientes de aceptación (lotes nuevos)" color="#7c3aed" empty="No hay lotes pendientes de aceptación" rows={alertas.pendientes.map(p=>(
+              <tr key={`${p.gtin}|${p.lot}`} style={{ borderTop:"1px solid rgba(0,0,0,0.04)" }}>
+                <td style={{ padding:"10px 14px", fontWeight:700, color:"#1e293b" }}>{p.nombre}</td>
+                <td style={{ padding:"10px 14px", fontFamily:"'Roboto Mono',monospace", color:"#475569" }}>{p.lot}</td>
+                <td style={{ padding:"10px 14px", color:"#475569" }}>{p.vencimiento}</td>
+                <td style={{ padding:"10px 14px", fontWeight:700 }}>{p.cantidad}</td>
+                <td style={{ padding:"10px 14px" }}>
+                  {canInventario ? <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={()=>cambiarEstadoLote(p, "ACEPTADO")} style={{ color:"#059669", border:"1px solid rgba(5,150,105,0.25)", background:"rgba(5,150,105,0.08)", padding:"5px 11px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>✓ Aceptar</button>
+                    <button onClick={()=>cambiarEstadoLote(p, "RECHAZADO")} style={{ color:"#dc2626", border:"1px solid rgba(220,38,38,0.2)", background:"rgba(220,38,38,0.06)", padding:"5px 11px", borderRadius:7, cursor:"pointer", fontWeight:700, fontSize:"11px" }}>✗ Rechazar</button>
+                  </div> : <span style={{ color:"#94a3b8", fontSize:"11px" }}>Requiere TECNÓLOGO/ADMIN</span>}
+                </td>
+              </tr>
+            ))} cols={["INSUMO","LOTE","VENCE","CANT.","DECISIÓN QC"]} />
 
             {/* Vencidos */}
             <AlertSection title="Vencidos — retirar del stock" color="#dc2626" empty="Sin productos vencidos 🎉" rows={alertas.vencidos.map(v=>(

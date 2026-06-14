@@ -308,6 +308,13 @@ async function runMigrations(db) {
     await db.exec(`ALTER TABLE maestro_productos ADD COLUMN min_stock INTEGER DEFAULT 0`);
     await db.exec("PRAGMA user_version = 17"); v = 17;
   }
+  // v18: aceptación de lote (ISO 15189 §6.6.3) — estado por unidad.
+  // Existentes → ACEPTADO (grandfathered). Nuevos ingresos → PENDIENTE (salvo lote ya aceptado).
+  if (v < 18) {
+    await db.exec(`ALTER TABLE inventario ADD COLUMN estado_aceptacion TEXT DEFAULT 'ACEPTADO'`);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_inv_estado ON inventario(estado_aceptacion)`);
+    await db.exec("PRAGMA user_version = 18"); v = 18;
+  }
 }
 
 // ── PIN admin por defecto: 1234 con must_change_pin obligatorio ─────────────
@@ -582,16 +589,22 @@ v1.post("/inventario", authenticate, canInv, async (req, res) => {
     if (!gtin || !lot || !expiration) return res.status(400).json({ success: false, message: "Faltan campos" });
     // cantidad opcional (default 1): inserta N unidades del mismo lote en una transacción
     const n = Math.max(1, Math.min(parseInt(req.body.cantidad, 10) || 1, 1000));
+    // Aceptación de lote (ISO 15189 §6.6.3): si el lote ya tiene unidades aceptadas,
+    // las nuevas heredan ACEPTADO; si es un lote nuevo, quedan PENDIENTE de aceptación.
+    const yaAceptado = await db.get(
+      "SELECT 1 FROM inventario WHERE gtin = ? AND lot = ? AND estado_aceptacion = 'ACEPTADO' AND fecha_baja IS NULL LIMIT 1",
+      [gtin, lot]);
+    const estado = yaAceptado ? "ACEPTADO" : "PENDIENTE";
     await db.exec("BEGIN");
     try {
       for (let i = 0; i < n; i++) {
-        await db.run("INSERT INTO inventario (id, gtin, lot, expiration, scanDate, usuario) VALUES (?, ?, ?, ?, ?, ?)",
-          [randomUUID(), gtin, lot, expiration, scanDate, req.user.nombre]);
+        await db.run("INSERT INTO inventario (id, gtin, lot, expiration, scanDate, usuario, estado_aceptacion) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [randomUUID(), gtin, lot, expiration, scanDate, req.user.nombre, estado]);
       }
       await db.exec("COMMIT");
     } catch (e) { await db.exec("ROLLBACK"); throw e; }
-    await registrarLog(req.user.nombre, "INGRESO STOCK", `GTIN: ${gtin} | Lote: ${lot} | x${n}`, getIP(req));
-    res.json({ success: true, cantidad: n });
+    await registrarLog(req.user.nombre, "INGRESO STOCK", `GTIN: ${gtin} | Lote: ${lot} | x${n} | ${estado}`, getIP(req));
+    res.json({ success: true, cantidad: n, estado_aceptacion: estado });
   } catch (e) { errRes(res, e); }
 });
 v1.patch("/inventario/:id", authenticate, canInv, async (req, res) => {
@@ -624,7 +637,7 @@ v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
     // Validar stock disponible por (gtin, lot) ANTES de tocar nada
     const insuficientes = [];
     for (const n of norm) {
-      const row = await db.get("SELECT COUNT(*) AS c FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL", [n.gtin, n.lot]);
+      const row = await db.get("SELECT COUNT(*) AS c FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'ACEPTADO'", [n.gtin, n.lot]);
       if (row.c < n.cant) insuficientes.push({ gtin: n.gtin, lot: n.lot, pedido: n.cant, disponible: row.c });
     }
     if (insuficientes.length)
@@ -636,7 +649,7 @@ v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
     try {
       for (const n of norm) {
         const rows = await db.all(
-          "SELECT id FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL ORDER BY expiration ASC, scanDate ASC LIMIT ?",
+          "SELECT id FROM inventario WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'ACEPTADO' ORDER BY expiration ASC, scanDate ASC LIMIT ?",
           [n.gtin, n.lot, n.cant]);
         for (const r of rows) {
           await db.run("UPDATE inventario SET fecha_baja = ? WHERE id = ?", [now, r.id]);
@@ -651,6 +664,28 @@ v1.post("/inventario/salida", authenticate, canInv, async (req, res) => {
     res.json({ success: true, descontados: total });
   } catch (e) { errRes(res, e, "Error en salida de stock"); }
 });
+// Aceptar o rechazar un lote completo (ISO 15189 §6.6.3) — decisión de QC.
+// ACEPTADO habilita el lote para salida; RECHAZADO lo segrega (da de baja).
+v1.patch("/inventario/lote/estado", authenticate, authorize("ADMIN", "TECNOLOGO"), async (req, res) => {
+  try {
+    const { gtin, lot, decision } = req.body;
+    if (!gtin || !lot || !["ACEPTADO", "RECHAZADO"].includes(decision))
+      return res.status(400).json({ success: false, message: "gtin, lot y decision (ACEPTADO|RECHAZADO) requeridos" });
+    const now = new Date().toISOString();
+    let affected;
+    if (decision === "ACEPTADO") {
+      const r = await db.run("UPDATE inventario SET estado_aceptacion = 'ACEPTADO' WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'PENDIENTE'", [gtin, lot]);
+      affected = r.changes;
+    } else {
+      // RECHAZADO: marca estado y segrega físicamente (fecha_baja → fuera del stock usable)
+      const r = await db.run("UPDATE inventario SET estado_aceptacion = 'RECHAZADO', fecha_baja = ? WHERE gtin = ? AND lot = ? AND fecha_baja IS NULL AND estado_aceptacion = 'PENDIENTE'", [now, gtin, lot]);
+      affected = r.changes;
+    }
+    await registrarLog(req.user.nombre, decision === "ACEPTADO" ? "ACEPTAR LOTE" : "RECHAZAR LOTE", `GTIN: ${gtin} | Lote: ${lot} | ${affected} u.`, getIP(req));
+    res.json({ success: true, decision, afectadas: affected });
+  } catch (e) { errRes(res, e, "Error al cambiar estado del lote"); }
+});
+
 // Bulk import: recibe array de productos (maestro_productos), inserta en transacción.
 // Cada fila: { gtin, nombre, detalle?, pack?, seccion, temperatura?, preparacion? }
 v1.post("/inventario/bulk-import", authenticate, authorize("ADMIN"), async (req, res) => {
@@ -794,10 +829,10 @@ const EXP_WARN_DAYS = 90, EXP_CRIT_DAYS = 30;
 
 v1.get("/inventario/alertas", authenticate, async (req, res) => {
   try {
-    const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion, m.min_stock
+    const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, i.estado_aceptacion, m.nombre, m.abreviado, m.seccion, m.min_stock
       FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
       WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
-    const lotes = {}, porProducto = {};
+    const lotes = {}, porProducto = {}, pendMap = {};
     for (const r of rows) {
       const k = r.gtin + "||" + r.lot;
       if (!lotes[k]) lotes[k] = { gtin: r.gtin, lot: r.lot, expiration: r.expiration, vencimiento: fmtExpServer(r.expiration),
@@ -805,6 +840,11 @@ v1.get("/inventario/alertas", authenticate, async (req, res) => {
       lotes[k].cantidad++;
       if (!porProducto[r.gtin]) porProducto[r.gtin] = { gtin: r.gtin, nombre: r.nombre || "Sin clasificar", seccion: r.seccion || "", min_stock: r.min_stock || 0, cantidad: 0 };
       porProducto[r.gtin].cantidad++;
+      if (r.estado_aceptacion === "PENDIENTE") {
+        if (!pendMap[k]) pendMap[k] = { gtin: r.gtin, lot: r.lot, expiration: r.expiration, vencimiento: fmtExpServer(r.expiration),
+          nombre: r.nombre || "Sin clasificar", seccion: r.seccion || "", cantidad: 0 };
+        pendMap[k].cantidad++;
+      }
     }
     const arr = Object.values(lotes);
     const vencidos = arr.filter(l => l.dias !== null && l.dias < 0).sort((a, b) => a.dias - b.dias);
@@ -812,7 +852,9 @@ v1.get("/inventario/alertas", authenticate, async (req, res) => {
       .sort((a, b) => a.dias - b.dias).map(l => ({ ...l, criticidad: l.dias <= EXP_CRIT_DAYS ? "critico" : "aviso" }));
     const stockBajo = Object.values(porProducto).filter(p => p.min_stock > 0 && p.cantidad < p.min_stock)
       .sort((a, b) => (a.cantidad - a.min_stock) - (b.cantidad - b.min_stock));
-    res.json({ vencidos, porVencer, stockBajo, resumen: { vencidos: vencidos.length, porVencer: porVencer.length, stockBajo: stockBajo.length } });
+    const pendientes = Object.values(pendMap).sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+    res.json({ vencidos, porVencer, stockBajo, pendientes,
+      resumen: { vencidos: vencidos.length, porVencer: porVencer.length, stockBajo: stockBajo.length, pendientes: pendientes.length } });
   } catch (e) { errRes(res, e); }
 });
 
@@ -822,15 +864,15 @@ v1.get("/export/csv", authenticate, async (req, res) => {
     const tipo = String(req.query.tipo || "inventario");
     let filename = tipo, csv = "";
     if (tipo === "inventario") {
-      const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion, m.min_stock
+      const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, i.estado_aceptacion, m.nombre, m.abreviado, m.seccion, m.min_stock
         FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
         WHERE i.fecha_baja IS NULL AND (m.fecha_baja IS NULL OR m.fecha_baja = '')`);
       const g = {};
       for (const r of rows) { const k = r.gtin + "||" + r.lot; if (!g[k]) g[k] = { ...r, cantidad: 0 }; g[k].cantidad++; }
       const data = Object.values(g).sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
-      csv = toCSV(["Producto", "Abreviado", "GTIN", "Lote", "Vencimiento", "Cantidad", "Seccion", "Estado", "Dias_a_vencer", "Stock_minimo"],
+      csv = toCSV(["Producto", "Abreviado", "GTIN", "Lote", "Vencimiento", "Cantidad", "Seccion", "Estado", "Dias_a_vencer", "Stock_minimo", "Aceptacion"],
         data.map(d => { const dias = diasAVencer(d.expiration); const estado = dias === null ? "-" : dias < 0 ? "VENCIDO" : dias <= EXP_WARN_DAYS ? "POR VENCER" : "ACTIVO";
-          return [d.nombre, d.abreviado || "", d.gtin, d.lot, fmtExpServer(d.expiration), d.cantidad, d.seccion || "", estado, dias ?? "", d.min_stock || 0]; }));
+          return [d.nombre, d.abreviado || "", d.gtin, d.lot, fmtExpServer(d.expiration), d.cantidad, d.seccion || "", estado, dias ?? "", d.min_stock || 0, d.estado_aceptacion || "ACEPTADO"]; }));
     } else if (tipo === "vencimientos") {
       const rows = await db.all(`SELECT i.gtin, i.lot, i.expiration, m.nombre, m.abreviado, m.seccion
         FROM inventario i LEFT JOIN maestro_productos m ON i.gtin = m.gtin
