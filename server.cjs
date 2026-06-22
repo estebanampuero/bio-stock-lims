@@ -356,9 +356,13 @@ async function runMigrations(db) {
     await db.exec(`DROP TABLE maestro_productos`);
     await db.exec(`ALTER TABLE maestro_productos_new RENAME TO maestro_productos`);
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_maestro_org ON maestro_productos(org_id)`);
+    // user_version DENTRO de la transacción: si el proceso muere entre el COMMIT y el set
+    // de versión, la migración se re-ejecutaría sobre tablas ya migradas y abortaría el
+    // arranque (ADD COLUMN duplicado). Atómico = o todo o nada.
+    await db.exec("PRAGMA user_version = 19");
     await db.exec("COMMIT");
+    v = 19;
    } catch (e) { await db.exec("ROLLBACK"); throw e; }
-    await db.exec("PRAGMA user_version = 19"); v = 19;
   }
 }
 
@@ -463,10 +467,10 @@ function listBackups() {
     .sort((a, b) => b.mtime - a.mtime);
 }
 
-async function ejecutarBackupDB() {
+async function ejecutarBackupDB(prefix = "inventario_") {
   if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const dest = path.join(BACKUPS_DIR, `inventario_${ts}.db`);
+  const dest = path.join(BACKUPS_DIR, `${prefix}${ts}.db`);
   try {
     // VACUUM INTO crea una copia consistente sin bloquear writers
     await db.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
@@ -530,6 +534,23 @@ async function backupAlArranqueSiHaceFalta() {
   }
 }
 
+// Versión de schema que conoce ESTE código. Subir junto con cada migración nueva.
+const LATEST_DB_VERSION = 19;
+
+// Antes de migrar: si la DB ya existe (user_version > 0) y está por debajo de la versión
+// del código, tomar un backup etiquetado pre-migración. Si una migración corrompe datos,
+// este snapshot es la única red de seguridad (los backups normales corren DESPUÉS de migrar).
+// Usa prefijo propio para que la retención de 30d no lo purgue: los snapshots de migración
+// son raros e importantes y conviene conservarlos.
+async function backupPreMigracionSiHaceFalta(db) {
+  const { user_version } = await db.get("PRAGMA user_version");
+  if (user_version > 0 && user_version < LATEST_DB_VERSION) {
+    console.log(`🛟 Migración pendiente (v${user_version} → v${LATEST_DB_VERSION}) — backup pre-migración...`);
+    const dest = await ejecutarBackupDB(`premigracion_v${user_version}_`);
+    if (!dest) throw new Error("Backup pre-migración falló — se aborta para no migrar sin red de seguridad");
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════════════════════════════════════════
@@ -541,6 +562,7 @@ async function backupAlArranqueSiHaceFalta() {
   await db.exec("PRAGMA cache_size   = -64000");
   await db.exec("PRAGMA temp_store   = memory");
   await db.exec("PRAGMA foreign_keys = ON");
+  await backupPreMigracionSiHaceFalta(db);
   await runMigrations(db);
   await rotateDefaultAdminPin();
   await seedAdminFromEnv();
