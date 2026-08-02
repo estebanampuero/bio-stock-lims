@@ -1,0 +1,80 @@
+name: Release
+
+# Al empujar un tag v* (ej: v1.2.0) se construye el .exe autocontenido, se compila
+# el instalador Inno Setup y se publica el Setup.exe + latest.json en GitHub Releases.
+# Check-Update.ps1 (en los clientes) consulta latest.json para autoactualizarse.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build self-contained .exe (Node + React + SQLite)
+        run: npm run build:exe
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: .\installer\build-installer.ps1
+
+      - name: Resolve version and installer path
+        id: meta
+        shell: pwsh
+        run: |
+          $version = (Get-Content release/VERSION.txt -Raw).Trim()
+          $setup = "dist-installer/BioStock-Setup-$version.exe"
+          if (-not (Test-Path $setup)) { throw "No se encontró $setup" }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "setup=$setup"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Generate latest.json (autoupdate manifest)
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $setup   = "${{ steps.meta.outputs.setup }}"
+          $tag     = "${{ github.ref_name }}"
+          if (-not $tag -or $tag -eq '') { $tag = "v$version" }
+          $repo    = "${{ github.repository }}"
+          $fileName = Split-Path $setup -Leaf
+          $sha = (Get-FileHash -Path $setup -Algorithm SHA256).Hash.ToLower()
+          $manifest = [ordered]@{
+            version  = $version
+            url      = "https://github.com/$repo/releases/download/$tag/$fileName"
+            sha256   = $sha
+            notes    = "Release $version"
+            released = (Get-Date).ToString("yyyy-MM-dd")
+          }
+          $manifest | ConvertTo-Json | Out-File -FilePath dist-installer/latest.json -Encoding utf8
+          Get-Content dist-installer/latest.json
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.meta.outputs.setup }}
+            dist-installer/latest.json
+          fail_on_unmatched_files: true
+          generate_release_notes: true

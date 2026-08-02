@@ -32,9 +32,13 @@ param(
   [int]   $Port         = 3000,
   [switch]$EnableTLS,
   [string]$ImportDb     = "",
+  [switch]$InPlace,
   [string]$ServiceName  = "BioStock-API",
   [string]$EventSource  = "BioStock-LIMS"
 )
+# -InPlace: los binarios YA están en $InstallPath (los colocó el instalador Inno).
+#           Se omite el paso de copia. Sin este flag, el script copia desde el
+#           directorio actual (uso manual desde el ZIP / release).
 
 $ErrorActionPreference = "Stop"
 
@@ -93,22 +97,27 @@ Set-Acl -Path $secretsDir -AclObject $acl
 Write-Host "      Solo SYSTEM y Administrators pueden leer secrets/."
 
 # ── 3. Copiar binarios desde la carpeta actual ─────────────────────────────
-Write-Host "[3/8] Copiando binarios..."
-$source = (Get-Location).Path
-$itemsToCopy = @("BioStock-LIMS.exe", "node_sqlite3.node", "sqlite3.exe", "Iniciar.bat", "COMO-INSTALAR.txt")
-foreach ($f in $itemsToCopy) {
-  $src = Join-Path $source $f
-  if (Test-Path $src) {
-    Copy-Item -Path $src -Destination $InstallPath -Force
-    Write-Host "      Copiado: $f"
-  }
-}
-# Scripts PowerShell
-$scriptsSourceDir = Join-Path $source "scripts"
 $scriptsDestDir = Join-Path $InstallPath "scripts"
-if (Test-Path $scriptsSourceDir) {
-  if (-not (Test-Path $scriptsDestDir)) { New-Item -Path $scriptsDestDir -ItemType Directory | Out-Null }
-  Copy-Item -Path (Join-Path $scriptsSourceDir "*.ps1") -Destination $scriptsDestDir -Force
+if ($InPlace) {
+  Write-Host "[3/8] Modo -InPlace: binarios ya colocados por el instalador. Se omite la copia."
+  if (-not (Test-Path $scriptsDestDir)) { New-Item -Path $scriptsDestDir -ItemType Directory -Force | Out-Null }
+} else {
+  Write-Host "[3/8] Copiando binarios..."
+  $source = (Get-Location).Path
+  $itemsToCopy = @("BioStock-LIMS.exe", "node_sqlite3.node", "sqlite3.exe", "Iniciar.bat", "COMO-INSTALAR.txt")
+  foreach ($f in $itemsToCopy) {
+    $src = Join-Path $source $f
+    if (Test-Path $src) {
+      Copy-Item -Path $src -Destination $InstallPath -Force
+      Write-Host "      Copiado: $f"
+    }
+  }
+  # Scripts PowerShell
+  $scriptsSourceDir = Join-Path $source "scripts"
+  if (Test-Path $scriptsSourceDir) {
+    if (-not (Test-Path $scriptsDestDir)) { New-Item -Path $scriptsDestDir -ItemType Directory | Out-Null }
+    Copy-Item -Path (Join-Path $scriptsSourceDir "*.ps1") -Destination $scriptsDestDir -Force
+  }
 }
 
 # ── 4. Generar TLS autofirmado si --EnableTLS ──────────────────────────────

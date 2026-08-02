@@ -25,6 +25,7 @@ const RELEASE  = path.join(ROOT, "release");
 const DIST     = path.join(ROOT, "dist");
 const TMP      = path.join(ROOT, ".tmp-exe-build");
 
+const APP_VERSION     = require(path.join(ROOT, "package.json")).version;
 const SQLITE3_VERSION = require(path.join(ROOT, "node_modules/sqlite3/package.json")).version;
 const NODE_API        = 6;                          // sqlite3 v6 usa Node-API v6
 const WIN_TARBALL_URL = `https://github.com/TryGhost/node-sqlite3/releases/download/v${SQLITE3_VERSION}/sqlite3-v${SQLITE3_VERSION}-napi-v${NODE_API}-win32-x64.tar.gz`;
@@ -195,10 +196,10 @@ require("./server.cjs");
   const scriptsRel = path.join(RELEASE, "scripts");
   fs.mkdirSync(scriptsRel, { recursive: true });
   const psScripts = [
-    "Install-BioStock.ps1", "Update-BioStock.ps1", "Backup-BioStock.ps1",
-    "Verify-Backup.ps1", "Restore-BioStock.ps1", "Start-BioStock.ps1",
-    "Stop-BioStock.ps1", "Get-BioStockStatus.ps1", "Set-ExecutionPolicy-BioStock.ps1",
-    "BioStockConfig.ps1"
+    "Install-BioStock.ps1", "Uninstall-BioStock.ps1", "Update-BioStock.ps1",
+    "Check-Update.ps1", "Register-UpdateTask.ps1", "Backup-BioStock.ps1", "Verify-Backup.ps1",
+    "Restore-BioStock.ps1", "Start-BioStock.ps1", "Stop-BioStock.ps1",
+    "Get-BioStockStatus.ps1", "Set-ExecutionPolicy-BioStock.ps1", "BioStockConfig.ps1"
   ];
   for (const f of psScripts) {
     const src = path.join(ROOT, "scripts", f);
@@ -272,8 +273,11 @@ BASE DE DATOS:
        inventario_biorad.db
   - RESPALDAR este archivo diariamente (USB, NAS o carpeta de red)
 
-VERSION: 1.1.0
+VERSION: ${APP_VERSION}
 `);
+
+  // VERSION.txt — consumido por installer/BioStock.iss y por el pipeline de release
+  fs.writeFileSync(path.join(RELEASE, "VERSION.txt"), APP_VERSION + "\n");
 
   // ── 10. Resumen ────────────────────────────────────────────────────────────
   const sizeMB = (fs.statSync(exeOut).size / 1024 / 1024).toFixed(1);

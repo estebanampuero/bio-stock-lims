@@ -13,6 +13,7 @@ logs/
 *.db
 *.db-wal
 *.db-shm
+*.db.bak*
 
 # Secretos generados en runtime — NUNCA en git
 master.key
@@ -26,6 +27,9 @@ key.pem
 .tmp-exe-build/
 server-launcher.cjs
 .claude/
+
+# Instaladores compilados (se publican en GitHub Releases, no en git)
+dist-installer/
 
 # Cache del scanner de seguridad (secscan)
 .secscan/

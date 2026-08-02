@@ -20,6 +20,12 @@ const jwt        = require("jsonwebtoken");
 
 const BASE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 
+// Versión de la app — leída del package.json embebido por pkg (fallback "unknown").
+// Se expone en /api/version para que la autoactualización compare contra latest.json.
+const APP_VERSION = (() => {
+  try { return require("./package.json").version; } catch { return "unknown"; }
+})();
+
 // Secrets se prefieren desde subdir secrets/ (con ACL strict en Windows)
 const SECRETS_DIR  = process.env.SECRETS_DIR || path.join(BASE_DIR, "secrets");
 const LEGACY_DIR   = BASE_DIR;
@@ -1462,8 +1468,13 @@ v1.post("/admin/orgs", authenticate, authorize("SUPER_ADMIN"), async (req, res) 
 
 // ── HEALTH (no versionado, fuera de auth) ──────────────────────────────────
 app.get("/health", async (req, res) => {
-  try { await db.get("SELECT 1"); res.json({ status: "ok", timestamp: new Date().toISOString(), tls: TLS_ENABLED }); }
+  try { await db.get("SELECT 1"); res.json({ status: "ok", timestamp: new Date().toISOString(), tls: TLS_ENABLED, version: APP_VERSION }); }
   catch (e) { res.status(503).json({ status: "error", message: e.message }); }
+});
+
+// ── VERSION (público, sin auth) — usado por Check-Update.ps1 y la UI ────────
+app.get("/api/version", (_req, res) => {
+  res.json({ version: APP_VERSION, tls: TLS_ENABLED });
 });
 
 // ── Catch /api/* no versionado → 404 explícito (no cae al SPA) ─────────────
