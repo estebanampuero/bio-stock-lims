@@ -147,9 +147,15 @@ require("./server.cjs");
   console.log("🔨 Empaquetando con pkg (esto descarga el runtime Node 18 la 1ª vez)...\n");
 
   const exeOut = path.join(RELEASE, "BioStock-LIMS.exe");
-  const pkgBin = path.join(ROOT, "node_modules/.bin/pkg");
+  // Invocar el CLI de pkg con el Node actual en vez del shim node_modules/.bin/pkg:
+  // en Windows ese shim no es un ejecutable que spawnSync pueda lanzar directo
+  // (falla al instante con exit 1). Resolver el entry JS es cross-platform.
+  const pkgPkgJson = require(path.join(ROOT, "node_modules/pkg/package.json"));
+  const pkgBinRel  = typeof pkgPkgJson.bin === "string" ? pkgPkgJson.bin : pkgPkgJson.bin.pkg;
+  const pkgEntry   = path.join(ROOT, "node_modules/pkg", pkgBinRel);
 
-  const pkgRes = spawnSync(pkgBin, [
+  const pkgRes = spawnSync(process.execPath, [
+    pkgEntry,
     "server-launcher.cjs",
     "--targets", "node18-win-x64",
     "--output",  exeOut,
@@ -164,8 +170,8 @@ require("./server.cjs");
   }
   try { fs.unlinkSync(launcherPath); } catch (_) {}
 
-  if (pkgRes.status !== 0) {
-    console.error("\n❌ pkg falló");
+  if (pkgRes.error || pkgRes.status !== 0) {
+    console.error("\n❌ pkg falló", pkgRes.error ? `(${pkgRes.error.message})` : `(exit ${pkgRes.status})`);
     process.exit(1);
   }
 
