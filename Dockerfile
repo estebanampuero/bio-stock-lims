@@ -26,6 +26,9 @@ ENV NODE_ENV=production \
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server.cjs ./
+# package.json en runtime → server.cjs expone la versión real en /api/version
+# (pkg lo embebe solo; en Docker hay que copiarlo explícitamente).
+COPY package.json ./
 # Usuario no-root (uid 10001). El volumen /data se chowna en el deploy.
 RUN useradd -u 10001 -m -s /usr/sbin/nologin app && mkdir -p /data/secrets /data/backups && chown -R 10001:10001 /data /app
 USER app
