@@ -376,9 +376,13 @@ async function runMigrations(db) {
 // Para activar rotación a PIN aleatorio en producción: set AUTO_ROTATE_DEFAULT_PIN=1
 async function rotateDefaultAdminPin() {
   if (process.env.AUTO_ROTATE_DEFAULT_PIN !== "1") {
-    // Modo dev/default: garantizar que admin tenga 1234 + must_change_pin=1
+    // Modo dev/default: si admin sigue con el PIN de fábrica (1234), forzar el cambio
+    // al primer login. Si ya lo cambió no se toca: antes se re-forzaba en cada arranque
+    // (cada reinicio del servicio obligaba al admin a cambiar el PIN otra vez).
     const admin = await db.get("SELECT id, pin FROM usuarios WHERE nombre = 'admin'");
     if (!admin) return;
+    const isDefault = await bcrypt.compare("1234", admin.pin).catch(() => false);
+    if (!isDefault) return;
     await db.run("UPDATE usuarios SET must_change_pin = 1 WHERE id = ?", [admin.id]);
     console.log(`🔓 Modo dev: admin/1234 (debe cambiar PIN al primer login)`);
     return;
@@ -1282,13 +1286,17 @@ v1.post("/admin/restore/:tabla/:id", authenticate, authorize("ADMIN"), async (re
   } catch (e) { errRes(res, e); }
 });
 
+// Las vistas admin listan filas completas, pero el hash del PIN nunca debe salir del server:
+// con PINs de 4+ dígitos, un hash bcrypt filtrado se fuerza offline en minutos.
+const omitirSecretos = (tabla, rows) => tabla === "usuarios" ? rows.map(({ pin, ...r }) => r) : rows;
+
 // Lista los registros soft-deleted de una tabla — para mostrar la "Papelera"
 v1.get("/admin/trash/:tabla", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
     const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE org_id = ? AND ${meta.softCol} IS NOT NULL ORDER BY ${meta.softCol} DESC LIMIT 500`, [req.user.org_id]);
-    res.json(rows);
+    res.json(omitirSecretos(req.params.tabla, rows));
   } catch (e) { errRes(res, e); }
 });
 
@@ -1298,7 +1306,7 @@ v1.get("/admin/all/:tabla", authenticate, authorize("ADMIN"), async (req, res) =
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
     const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE org_id = ? ORDER BY ${meta.softCol} ASC LIMIT 2000`, [req.user.org_id]);
-    res.json(rows);
+    res.json(omitirSecretos(req.params.tabla, rows));
   } catch (e) { errRes(res, e); }
 });
 

@@ -276,10 +276,11 @@ export default function InventoryApp() {
   const fetchData = async () => {
     if (!currentUser) return;
     try {
+      // /logs es solo ADMIN: pedirlo con otro rol devolvía 403 en cada ciclo de polling.
       const [inv, cfg, lg, prot, anx, alr] = await Promise.all([
         apiFetch(`/inventario`),
         apiFetch(`/config`),
-        apiFetch(`/logs`),
+        isAdmin ? apiFetch(`/logs`) : Promise.resolve(null),
         apiFetch(`/protocolos`),
         apiFetch(`/anexos`),
         apiFetch(`/inventario/alertas`),
@@ -287,7 +288,7 @@ export default function InventoryApp() {
       if (inv.ok)  setInventory(await inv.json());
       if (alr.ok)  setAlertas(await alr.json());
       if (cfg.ok)  { const d = await cfg.json(); setSecciones(d.secciones.filter((s:any) => s.nombre)); setUsuarios(d.usuarios); }
-      if (lg.ok)   { const d = await lg.json(); setLogs(Array.isArray(d) ? d : d.rows || []); }
+      if (lg?.ok)  { const d = await lg.json(); setLogs(Array.isArray(d) ? d : d.rows || []); }
       if (prot.ok) setProtocolos(await prot.json());
       if (anx.ok)  setAnexos(await anx.json());
     } catch (e) { console.error(e); }

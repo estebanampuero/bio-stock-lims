@@ -274,10 +274,14 @@ EJECUTAR COMO SERVICIO WINDOWS (auto-start al encender el PC):
        nssm set BioStock Start SERVICE_AUTO_START
        nssm start BioStock
 
-BASE DE DATOS:
+BASE DE DATOS Y RESPALDOS:
   - Se crea automaticamente en la carpeta del .exe:
-       inventario_biorad.db
-  - RESPALDAR este archivo diariamente (USB, NAS o carpeta de red)
+       inventario_biorad.db  (junto a inventario_biorad.db-wal y -shm)
+  - El servidor genera cada dia (02:00) un respaldo consistente en la carpeta
+       backups\\  (junto al .exe)
+  - RESPALDAR ESA CARPETA diariamente (USB, NAS o carpeta de red).
+  - NO copiar inventario_biorad.db suelto con el servidor encendido: los
+    cambios recientes viven en el archivo -wal y la copia quedaria incompleta.
 
 VERSION: ${APP_VERSION}
 `);

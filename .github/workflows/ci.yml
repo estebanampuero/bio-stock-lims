@@ -25,3 +25,16 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # Los .ps1 solo se ejecutan en Windows (instalador, backups, autoupdate): un error de
+      # sintaxis pasaba inadvertido hasta producción. pwsh viene preinstalado en ubuntu-latest.
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem scripts/*.ps1, installer/*.ps1 | ForEach-Object {
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errs)
+            foreach ($e in $errs) { $bad++; Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)" }
+          }
+          if ($bad) { exit 1 }

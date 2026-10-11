@@ -117,6 +117,6 @@ function Show-Banner {
     $width = 60
     $border = '═' * $width
     Write-Host "`n╔$border╗" -ForegroundColor Cyan
-    Write-Host "║$((' ' * [Math]::Floor(($width - $Title.Length)/2))$Title$(' ' * [Math]::Ceiling(($width - $Title.Length)/2)))║" -ForegroundColor Cyan
+    Write-Host "║$(' ' * [Math]::Floor(($width - $Title.Length)/2))$Title$(' ' * [Math]::Ceiling(($width - $Title.Length)/2))║" -ForegroundColor Cyan
     Write-Host "╚$border╝`n" -ForegroundColor Cyan
 }

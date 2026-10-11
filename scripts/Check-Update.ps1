@@ -67,12 +67,44 @@ function Compare-SemVer {
 }
 
 # ── 1. Versión instalada ────────────────────────────────────────────────────
+# Fuente principal: VERSION.txt que el instalador deja junto al .exe ({app}\VERSION.txt;
+# este script vive en {app}\scripts). No depende de que el servicio esté arriba ni de TLS.
+# Respaldo: /api/version del servidor local.
+# Si no se puede determinar la versión se ABORTA (salvo -Force): antes se asumía 0.0.0
+# y el instalador se re-ejecutaba en silencio cada semana.
 $installed = $null
-try {
+$versionFile = Join-Path (Split-Path -Parent $PSScriptRoot) "VERSION.txt"
+if (Test-Path $versionFile) {
+  $installed = (Get-Content $versionFile -Raw).Trim()
+}
+if (-not $installed) {
   $localUrl = "${Scheme}://localhost:${Port}/api/version"
-  $installed = (Invoke-RestMethod -Uri $localUrl -TimeoutSec 8 -SkipCertificateCheck).version
-} catch {
-  Write-Host "No se pudo leer la version instalada desde /api/version. Se continua asumiendo 0.0.0." -ForegroundColor Yellow
+  $irmArgs  = @{ Uri = $localUrl; TimeoutSec = 8; UseBasicParsing = $true }
+  $prevCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+  if ($PSVersionTable.PSVersion.Major -ge 6) {
+    $irmArgs.SkipCertificateCheck = $true
+  } elseif ($Scheme -eq "https") {
+    # Windows PowerShell 5.1 (el de la tarea programada) no tiene -SkipCertificateCheck.
+    # El certificado local es autofirmado: se acepta SOLO para localhost y solo en esta llamada.
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+      param($sender, $cert, $chain, $errors)
+      ($errors -eq [System.Net.Security.SslPolicyErrors]::None) -or
+        (($sender -is [System.Net.HttpWebRequest]) -and ($sender.RequestUri.Host -eq "localhost"))
+    }
+  }
+  try {
+    $installed = (Invoke-RestMethod @irmArgs).version
+  } catch {
+    Write-Host "No se pudo leer la version instalada desde $localUrl ($($_.Exception.Message))." -ForegroundColor Yellow
+  } finally {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $prevCallback
+  }
+}
+if (-not $installed) {
+  if (-not $Force) {
+    Write-Audit -Message "Check-Update: no se pudo determinar la version instalada (ni VERSION.txt ni /api/version). No se actualiza; use -Force para reinstalar." -Level Warning -EventId 3104
+    exit 1
+  }
   $installed = "0.0.0"
 }
 Write-Host "Version instalada: $installed"
