@@ -60,7 +60,30 @@ if (-not (Test-Path $nssmDest)) {
   New-Item -Path $toolsDir -ItemType Directory -Force | Out-Null
   $nssmZip = Join-Path $env:TEMP "nssm-2.24.zip"
   $nssmDir = Join-Path $env:TEMP "nssm-extract"
-  Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $nssmZip -UseBasicParsing
+  # nssm.exe viaja dentro del instalador y corre como servicio: se fija su SHA-256
+  # (verificado contra nssm.cc y la copia de archive.org). nssm.cc suele dar 503, por
+  # eso hay reintentos y un espejo; la verificación del hash hace irrelevante la fuente.
+  $nssmSha256 = "727d1e42275c605e0f04aba98095c38a8e1e46def453cdffce42869428aa6743"
+  $nssmUrls = @(
+    "https://nssm.cc/release/nssm-2.24.zip",
+    "https://web.archive.org/web/2024id_/https://nssm.cc/release/nssm-2.24.zip"
+  )
+  $nssmOk = $false
+  foreach ($url in $nssmUrls) {
+    for ($try = 1; $try -le 3 -and -not $nssmOk; $try++) {
+      try {
+        Invoke-WebRequest -Uri $url -OutFile $nssmZip -UseBasicParsing -TimeoutSec 60
+        $hash = (Get-FileHash -Path $nssmZip -Algorithm SHA256).Hash.ToLower()
+        if ($hash -eq $nssmSha256) { $nssmOk = $true }
+        else { Write-Warning "SHA-256 inesperado desde $url ($hash); se descarta."; break }
+      } catch {
+        Write-Warning "Descarga de NSSM fallida ($url, intento $try): $($_.Exception.Message)"
+        Start-Sleep -Seconds (5 * $try)
+      }
+    }
+    if ($nssmOk) { break }
+  }
+  if (-not $nssmOk) { throw "No se pudo obtener nssm-2.24.zip con el SHA-256 esperado." }
   if (Test-Path $nssmDir) { Remove-Item $nssmDir -Recurse -Force }
   Expand-Archive -Path $nssmZip -DestinationPath $nssmDir -Force
   Copy-Item -Path (Join-Path $nssmDir "nssm-2.24\win64\nssm.exe") -Destination $nssmDest -Force
