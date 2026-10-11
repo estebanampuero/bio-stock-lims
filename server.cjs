@@ -376,9 +376,13 @@ async function runMigrations(db) {
 // Para activar rotación a PIN aleatorio en producción: set AUTO_ROTATE_DEFAULT_PIN=1
 async function rotateDefaultAdminPin() {
   if (process.env.AUTO_ROTATE_DEFAULT_PIN !== "1") {
-    // Modo dev/default: garantizar que admin tenga 1234 + must_change_pin=1
+    // Modo dev/default: si admin sigue con el PIN de fábrica (1234), forzar el cambio
+    // al primer login. Si ya lo cambió no se toca: antes se re-forzaba en cada arranque
+    // (cada reinicio del servicio obligaba al admin a cambiar el PIN otra vez).
     const admin = await db.get("SELECT id, pin FROM usuarios WHERE nombre = 'admin'");
     if (!admin) return;
+    const isDefault = await bcrypt.compare("1234", admin.pin).catch(() => false);
+    if (!isDefault) return;
     await db.run("UPDATE usuarios SET must_change_pin = 1 WHERE id = ?", [admin.id]);
     console.log(`🔓 Modo dev: admin/1234 (debe cambiar PIN al primer login)`);
     return;
