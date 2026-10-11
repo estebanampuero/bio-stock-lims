@@ -1286,13 +1286,17 @@ v1.post("/admin/restore/:tabla/:id", authenticate, authorize("ADMIN"), async (re
   } catch (e) { errRes(res, e); }
 });
 
+// Las vistas admin listan filas completas, pero el hash del PIN nunca debe salir del server:
+// con PINs de 4+ dígitos, un hash bcrypt filtrado se fuerza offline en minutos.
+const omitirSecretos = (tabla, rows) => tabla === "usuarios" ? rows.map(({ pin, ...r }) => r) : rows;
+
 // Lista los registros soft-deleted de una tabla — para mostrar la "Papelera"
 v1.get("/admin/trash/:tabla", authenticate, authorize("ADMIN"), async (req, res) => {
   try {
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
     const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE org_id = ? AND ${meta.softCol} IS NOT NULL ORDER BY ${meta.softCol} DESC LIMIT 500`, [req.user.org_id]);
-    res.json(rows);
+    res.json(omitirSecretos(req.params.tabla, rows));
   } catch (e) { errRes(res, e); }
 });
 
@@ -1302,7 +1306,7 @@ v1.get("/admin/all/:tabla", authenticate, authorize("ADMIN"), async (req, res) =
     const meta = ADMIN_TABLES[req.params.tabla];
     if (!meta) return res.status(400).json({ success: false, message: "Tabla inválida" });
     const rows = await db.all(`SELECT * FROM ${req.params.tabla} WHERE org_id = ? ORDER BY ${meta.softCol} ASC LIMIT 2000`, [req.user.org_id]);
-    res.json(rows);
+    res.json(omitirSecretos(req.params.tabla, rows));
   } catch (e) { errRes(res, e); }
 });
 

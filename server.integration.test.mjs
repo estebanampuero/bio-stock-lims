@@ -119,6 +119,28 @@ describe("server.cjs — PIN inicial del admin", () => {
   }, 60_000);
 });
 
+describe("server.cjs — vistas admin", () => {
+  it("no exponen el hash del PIN de los usuarios", async () => {
+    const s = await startServer(newDataDir());
+    try {
+      const l = await login(s.base, "admin", "1234");
+      const { body } = await api(s.base, "POST", "/cambiar-pin", { token: l.body.token, body: { pinActual: "1234", pinNuevo: "8642" } });
+      const token = body.token;
+      await api(s.base, "POST", "/usuarios", { token, body: { nombre: "tec1", rol: "TECNICO", pin: "5555" } });
+      const all = await api(s.base, "GET", "/admin/all/usuarios", { token });
+      expect(all.status).toBe(200);
+      expect(all.body.length).toBeGreaterThanOrEqual(2);
+      for (const u of all.body) expect(u).not.toHaveProperty("pin");
+
+      const tec = all.body.find(u => u.nombre === "tec1");
+      await api(s.base, "DELETE", `/usuarios/${tec.id}`, { token });
+      const trash = await api(s.base, "GET", "/admin/trash/usuarios", { token });
+      expect(trash.body.map(u => u.nombre)).toContain("tec1");
+      for (const u of trash.body) expect(u).not.toHaveProperty("pin");
+    } finally { await stopServer(s); }
+  }, 60_000);
+});
+
 afterAll(() => {
   for (const d of tmpDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* Windows puede retener el archivo un instante */ }
