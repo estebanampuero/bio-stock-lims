@@ -1,0 +1,40 @@
+# Ruta de BIO-STOCK en el Traefik de Easypanel (file provider, recarga en caliente).
+# Se instala en: /etc/easypanel/traefik/config/biostock.yml
+#
+# Todos los nombres llevan prefijo "biostock" y no se referencia ningún middleware de otro
+# archivo: el file provider fusiona todos los archivos del directorio, y un nombre repetido
+# con distinta definición hace que Traefik lo descarte para TODOS los routers que lo usan.
+http:
+  routers:
+    biostock:
+      rule: Host(`biostock.aurik.cl`)
+      entryPoints:
+        - https
+      service: biostock-service
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - biostock-hsts
+    biostock-http:
+      rule: Host(`biostock.aurik.cl`)
+      entryPoints:
+        - http
+      middlewares:
+        - biostock-redirect-https
+      service: biostock-service
+  services:
+    biostock-service:
+      loadBalancer:
+        servers:
+          - url: http://bio-stock-lims:3000
+  middlewares:
+    biostock-redirect-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+    biostock-hsts:
+      headers:
+        stsSeconds: 63072000
+        stsIncludeSubdomains: true
+        stsPreload: false
+        forceSTSHeader: true

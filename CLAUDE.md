@@ -14,10 +14,10 @@ Gran parte de este documento describe el plan/estado viejo. Lo que de verdad rig
 
 - **Seguridad ya implementada:** JWT + bcrypt + lockout persistente, cambio de PIN forzado **server-side**, CORS con allowlist, rate limit global, gate `REQUIRE_TLS`. (Las secciones que dicen "password hardcodeada / sin auth" son históricas.)
 - **Módulo diuresis ELIMINADO** junto con todo el cifrado de PII (`encPII`/`decPII`/`master.key`/`pii_access_log`). Ya no hay datos de paciente. Roles actuales: **ADMIN, TECNOLOGO, TECNICO** (TOMA_MUESTRA eliminado).
-- **Despliegue de PRUEBAS en la nube:** VPS Contabo (`contabo-dji`), contenedor Docker en la red `easypanel`, ruteado por **Traefik** con HTTPS Let's Encrypt en **https://biostock.aurik.cl**. DB SQLite en volumen `/data`. Redeploy: `ssh contabo-dji /opt/redeploy-biostock.sh`. Dockerfile compila sqlite3 desde fuente (prebuilt exige GLIBC 2.38). El on-premise Windows (`Install-BioStock.ps1`) sigue siendo válido para producción del laboratorio.
+- **Despliegue de PRUEBAS en la nube:** VPS Contabo (`contabo-dji`) compartido con otros proyectos: contenedor Docker propio, aislado (red `biostock_edge` una vez conectada a Traefik, límites CPU/RAM/PIDs, logs rotados, sin puertos en el host), ruteado por **Traefik** con HTTPS Let's Encrypt en **https://biostock.aurik.cl**. DB SQLite en volumen `/data`. Redeploy: `ssh contabo-dji /opt/redeploy-biostock.sh` (`--rollback` vuelve a la imagen anterior); script y ruta Traefik versionados en `deploy/vps/` (ver su README). Dockerfile compila sqlite3 desde fuente (prebuilt exige GLIBC 2.38). El on-premise Windows (`Install-BioStock.ps1`) sigue siendo válido para producción del laboratorio.
 - **Parser de escáner multi-formato** (`gs1Parser.ts`): GS1 paréntesis/crudo + EAN/UPC/ITF + **formatos personalizados por regex** administrados desde el panel (tabla `scan_formats`, migración v16). Hay un "Diagnóstico escáner" y una vista "Formatos de escáner" con probador en vivo.
 - **Roadmap de producto:** validar single-tenant con un laboratorio → luego **multi-tenant SaaS** (org_id, rol SUPER_ADMIN, scoping, PostgreSQL). Los formatos de escáner ya son config global de plataforma.
-- **CI:** `.github/workflows/ci.yml` (build + tests en cada push). Migraciones SQLite hasta **v16**.
+- **CI:** `.github/workflows/ci.yml` (build + tests + parseo de todos los `.ps1` en cada push). `server.integration.test.mjs` arranca el `server.cjs` real sobre una DB temporal. Migraciones SQLite hasta **v19**.
 
 Reporte de readiness más reciente: `docs/PROD_READINESS_2026-06-05.md`.
 
